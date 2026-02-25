@@ -574,3 +574,403 @@ curl -X POST http://127.0.0.1:9999/ui/open-email \
 ---
 
 
+
+
+
+
+
+
+**Claude Code Prompt:**
+
+```markdown
+# 任务：为 ClawMail 添加直接发送邮件的 API 端点
+
+## 背景
+ClawMail 目前有一个 `/reply` API 可以打开回复窗口，但需要用户手动点击发送。
+现在需要添加一个新的 API 端点 `/send-reply`，可以直接发送回复邮件而不打开 UI。
+
+## 项目位置
+C:\Users\a\Desktop\projectA\clawmail
+
+## 数据库位置
+C:\Users\a\clawmail_data\clawmail.db
+
+## 现有代码参考
+- API 服务器：clawmail/api/server.py
+- SMTP 客户端：clawmail/infrastructure/email_clients/smtp_client.py
+
+## 需要实现的功能
+
+### 1. 新增 API 端点：POST /send-reply
+
+请求体：
+```json
+{
+"email_id": "string", // 原邮件ID（必填）
+"reply_body": "string", // 回复内容（必填）
+"reply_all": false, // 是否回复所有人，默认 false
+"subject_override": "string" // 可选，自定义主题（默认自动添加 Re:）
+}
+```
+
+响应：
+```json
+{
+"success": true,
+"message_id": "string", // 发送后的 Message-ID
+"sent_at": "2026-02-25T..."
+}
+```
+
+### 2. 实现细节
+
+- 从数据库获取原邮件信息（收件人、主题等）
+- 自动构建回复主题（添加 Re: 前缀）
+- 构建引用原文的邮件正文
+- 获取账户的 SMTP 凭证（需要实现从安全存储获取密码）
+- 使用现有的 ClawSMTPClient 发送邮件
+- 发送成功后，更新原邮件的 reply_status
+
+### 3. SMTP 凭证获取
+
+查看 _window._cred 或类似机制来获取账户密码。如果需要在 API 层独立运行，可能需要：
+- 添加 credentials manager 的引用
+- 或者临时允许传入密码（不推荐长期使用）
+
+### 4. 安全考虑
+
+- 需要验证 email_id 存在
+- 需要确保账户已配置 SMTP
+- 添加适当的错误处理和日志
+
+## 测试方式
+
+发送测试请求：
+```bash
+curl -X POST http://127.0.0.1:9999/send-reply \
+-H "Content-Type: application/json" \
+-d '{
+"email_id": "a2abb51d-d52e-47de-86fc-1c9ea0101e25",
+"reply_body": "测试回复内容",
+"reply_all": false
+}'
+```
+
+## 其他要求
+
+1. 参考现有的 `/reply` 端点实现，复用其逻辑
+2. 保持代码风格一致
+3. 添加适当的错误处理和 HTTP 状态码
+4. 更新 test_reply_api.md 文档，添加新接口说明
+
+请实现这个功能，并确保可以正常发送邮件。
+```
+
+
+
+
+
+
+
+
+
+## 任务目标
+为 ClawMail 添加两个新的 API 端点，支持 AI 助手自动处理待办任务并发送邮件。
+
+## 项目路径
+`C:\Users\a\Desktop\projectA\clawmail`
+
+## 现有代码参考
+- API 服务器：`clawmail/api/server.py`
+- SMTP 客户端：`clawmail/infrastructure/email_clients/smtp_client.py`
+- 凭据管理：`clawmail/infrastructure/security/credential_manager.py`
+
+---
+
+## 需要实现的端点
+
+### 1. POST /send-reply
+
+**功能**：直接发送回复邮件，不打开 UI 撰写窗口。
+
+**请求体模型**：
+```python
+class SendReplyRequest(BaseModel):
+    email_id: str                    # 原邮件ID（必填）
+    reply_body: str                  # 回复正文（必填）
+    reply_all: bool = False          # 是否回复所有人，默认 false
+    subject_override: Optional[str] = None  # 可选，自定义主题
+```
+
+**实现逻辑**：
+1. 验证 `email_id` 存在，获取原邮件
+2. 获取账户信息（第一个账户即可）
+3. 使用 `CredentialManager` 解密密码
+4. 构建回复主题：
+   - 如果原主题不以 "Re:" 开头，添加 "Re: " 前缀
+   - 如果提供了 `subject_override`，使用自定义主题
+5. 构建收件人列表：
+   - 从原邮件 `from_address` 获取发件人邮箱
+   - 如果 `reply_all=True`，添加原邮件的 `to_addresses` 和 `cc_addresses`（排除自己）
+6. 构建引用原文的 HTML（参考现有的 `_build_reply_quote` 函数）
+7. 使用 `ClawSMTPClient.send_email()` 发送邮件
+8. 发送成功后更新原邮件的 `reply_status = 'replied'`
+9. 返回发送结果
+
+**响应模型**：
+```python
+{
+    "success": true,
+    "message_id": "生成的Message-ID",
+    "sent_at": "2026-02-25T10:30:00Z"
+}
+
+# 或错误时
+{
+    "success": false,
+    "error": "错误信息"
+}
+```
+
+**错误处理**：
+- 404: Email not found
+- 400: No account configured / Missing required fields
+- 500: SMTP send failed
+
+---
+
+### 2. POST /ui/confirm-dialog
+
+**功能**：显示确认弹窗，让用户选择如何处理 AI 待办任务。
+
+**请求体模型**：
+```python
+class ConfirmDialogOption(BaseModel):
+    id: str          # 选项标识符
+    label: str       # 显示文本
+
+class ConfirmDialogRequest(BaseModel):
+    title: str                           # 弹窗标题
+    message: str                         # 弹窗内容（支持换行）
+    options: List[ConfirmDialogOption]   # 选项列表（2-4个选项）
+    default_option_id: Optional[str] = None  # 默认选中项
+    timeout_seconds: int = 60            # 超时时间，默认60秒
+```
+
+**实现逻辑**：
+1. 创建一个新的 Qt 对话框窗口（类似 ComposeDialog）
+2. 显示标题和内容
+3. 根据 `options` 动态生成按钮
+4. 等待用户点击或超时
+5. 关闭窗口并返回结果
+
+**UI 设计建议**：
+```
++------------------------------------------+
+|  AI待办处理确认                    [X]  |
++------------------------------------------+
+|                                          |
+|  发现待办任务：确认会议时间              |
+|                                          |
+|  关联邮件：Xitong确认明天下午可参会      |
+|                                          |
+|  建议操作：回复邮件确认 14:00-15:00      |
+|                                          |
++------------------------------------------+
+|  [回复 14:00-15:00]  [询问对方]  [取消] |
++------------------------------------------+
+```
+
+**响应模型**：
+```python
+# 用户选择时
+{
+    "success": true,
+    "selected_option_id": "reply_14_15",
+    "confirmed_at": "2026-02-25T10:30:00Z"
+}
+
+# 超时时
+{
+    "success": false,
+    "error": "timeout",
+    "selected_option_id": null
+}
+
+# 用户关闭窗口时
+{
+    "success": false,
+    "error": "cancelled",
+    "selected_option_id": null
+}
+```
+
+**实现细节**：
+- 使用 `QDialog` 或自定义窗口
+- 使用 `QTimer` 处理超时
+- 使用 `QEventLoop` 或回调等待用户响应
+- 确保在等待期间不阻塞其他 API 请求
+
+---
+
+## 文件修改清单
+
+### 1. `clawmail/api/server.py`
+
+添加新的 Pydantic 模型：
+```python
+class SendReplyRequest(BaseModel):
+    ...
+
+class ConfirmDialogOption(BaseModel):
+    ...
+
+class ConfirmDialogRequest(BaseModel):
+    ...
+```
+
+添加新的端点：
+```python
+@app.post("/send-reply")
+async def send_reply(req: SendReplyRequest):
+    ...
+
+@app.post("/ui/confirm-dialog")
+async def confirm_dialog(req: ConfirmDialogRequest):
+    ...
+```
+
+### 2. 可能需要的新文件
+
+如果确认对话框逻辑复杂，可以创建：
+`clawmail/ui/components/confirm_dialog.py`
+
+参考现有的 `compose_dialog.py` 实现。
+
+---
+
+## 测试命令
+
+### 测试 /send-reply
+```bash
+curl -X POST http://127.0.0.1:9999/send-reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email_id": "a2abb51d-d52e-47de-86fc-1c9ea0101e25",
+    "reply_body": "Xitong，\n\n好的，那我们定在明天下午14:00-15:00开会。\n\n会议室我会提前预订，到时候见！\n\n谢谢，\nTony",
+    "reply_all": false
+  }'
+```
+
+### 测试 /ui/confirm-dialog
+```bash
+curl -X POST http://127.0.0.1:9999/ui/confirm-dialog \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "AI待办处理确认",
+    "message": "发现待办任务：确认会议时间\n关联邮件：Xitong确认明天下午可参会\n\n建议操作：回复邮件确认 14:00-15:00",
+    "options": [
+      {"id": "reply_14_15", "label": "回复 14:00-15:00"},
+      {"id": "ask_time", "label": "询问对方具体时间"},
+      {"id": "cancel", "label": "暂不处理"}
+    ],
+    "default_option_id": "reply_14_15",
+    "timeout_seconds": 60
+  }'
+```
+
+---
+
+## 使用场景示例
+
+当 AI 检测到带有【待办任务执行请求】的任务时：
+
+```python
+# 1. 分析任务和关联邮件
+# 2. 调用确认弹窗让用户选择
+response = requests.post("http://127.0.0.1:9999/ui/confirm-dialog", json={
+    "title": "AI待办处理确认",
+    "message": "任务：确认明天下午会议时间\n\n检测到关联邮件：Xitong确认可参会\n\n建议：回复确认 14:00-15:00",
+    "options": [
+        {"id": "send", "label": "发送确认 14:00-15:00"},
+        {"id": "custom", "label": "自定义时间"},
+        {"id": "skip", "label": "跳过"}
+    ]
+})
+
+# 3. 根据用户选择执行
+if response.json()["selected_option_id"] == "send":
+    requests.post("http://127.0.0.1:9999/send-reply", json={
+        "email_id": "xxx",
+        "reply_body": "..."
+    })
+    requests.post(f"http://127.0.0.1:9999/tasks/{task_id}/complete")
+```
+
+---
+
+## 文档更新
+
+更新 `test_reply_api.md`，添加新接口的说明和测试用例。
+
+---
+
+请实现以上两个 API 端点，确保：
+1. 代码风格与现有代码一致
+2. 有适当的错误处理和日志
+3. 测试命令可以正常工作
+4. 更新相关文档
+
+
+
+
+
+
+
+
+
+
+
+
+## Prompt 包含的内容
+
+### 需要修改的文件
+
+| 文件 | 修改内容 |
+|------|---------|
+| `server.py` | `ComposeRequest` 添加 `attachments` 字段 |
+| `server.py` | `/compose` 端点传递附件列表 |
+| `compose_dialog.py` | 添加 `initial_attachments` 参数 |
+| `compose_dialog.py` | 自动加载附件到 UI |
+| `test_reply_api.md` | 添加附件上传示例 |
+
+### 核心代码示例
+
+**API 调用：**
+```bash
+curl -X POST http://127.0.0.1:9999/compose \
+-H "Content-Type: application/json" \
+-d '{
+"to": "cayley.demo4@outlook.com",
+"subject": "带附件的邮件",
+"body": "请查收附件",
+"attachments": [
+"C:\\Users\\a\\Desktop\\skills.zip"
+]
+}'
+```
+
+### 可选增强
+- ✅ 文件大小检查（25MB 限制）
+- ✅ 文件存在验证
+- ✅ 附件数量限制
+
+---
+
+**使用方法：**
+
+1. 在 VS Code 中打开 ClawMail 项目
+2. 启动 Claude Code
+3. 把 prompt 文件内容复制粘贴给 Claude Code
+4. 它会帮你实现附件上传功能
+

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:ultramail.ai)",
+      "WebFetch(domain:www.baytechconsulting.com)"
+    ]
+  }
+}

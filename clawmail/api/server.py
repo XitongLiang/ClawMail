@@ -2,6 +2,7 @@
 ClawMail 本地 HTTP REST API
 监听 127.0.0.1:9999，供外部 AI 助手远程调用。
 """
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Optional, List
@@ -45,12 +46,33 @@ class ComposeRequest(BaseModel):
     subject: Optional[str] = None
     body: Optional[str] = None
     draft: bool = False
+    attachments: Optional[List[str]] = None   # 附件绝对路径列表
 
 
 class ReplyRequest(BaseModel):
     email_id: str                    # 原邮件ID（必填）
     reply_all: bool = False          # 是否回复所有人，默认 false
     initial_body: Optional[str] = None   # 预填充的回复内容（可选）
+
+
+class SendReplyRequest(BaseModel):
+    email_id: str                          # 原邮件ID（必填）
+    reply_body: str                        # 回复正文（必填）
+    reply_all: bool = False                # 是否回复所有人，默认 false
+    subject_override: Optional[str] = None  # 可选，覆盖自动生成的主题
+
+
+class ConfirmDialogOption(BaseModel):
+    id: str      # 选项标识符，返回给调用方
+    label: str   # 按钮显示文字
+
+
+class ConfirmDialogRequest(BaseModel):
+    title: str
+    message: str
+    options: List[ConfirmDialogOption]          # 2-4 个选项
+    default_option_id: Optional[str] = None     # 保留字段（兼容规范）
+    timeout_seconds: int = 60
 
 
 class SearchRequest(BaseModel):
@@ -77,6 +99,20 @@ async def compose(req: ComposeRequest):
         raise HTTPException(status_code=400, detail="No account configured")
     account = accs[0]
     cc_str = ", ".join(req.cc) if req.cc else ""
+
+    # 校验附件（仅 UI 模式；draft 模式忽略附件）
+    import os as _os
+    _MAX_ATTACH_SIZE = 25 * 1024 * 1024  # 25 MB
+    validated_attachments: list = []
+    for p in (req.attachments or []):
+        if not _os.path.isfile(p):
+            raise HTTPException(status_code=400, detail=f"Attachment not found: {p}")
+        if _os.path.getsize(p) > _MAX_ATTACH_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Attachment exceeds 25 MB limit: {_os.path.basename(p)}",
+            )
+        validated_attachments.append(p)
 
     if req.draft:
         # 直接写库，不打开 UI
@@ -114,12 +150,17 @@ async def compose(req: ComposeRequest):
                 initial_cc=cc_str,
                 initial_subject=req.subject or "",
                 initial_body=req.body or "",
+                initial_attachments=validated_attachments or None,
                 parent=_window,
             )
             dlg.show()
 
         QTimer.singleShot(0, _open)
-        return {"success": True, "window_id": "compose"}
+        return {
+            "success": True,
+            "window_id": "compose",
+            "attachments_loaded": len(validated_attachments),
+        }
 
 
 @app.post("/reply")
@@ -568,6 +609,124 @@ async def snooze_task(task_id: str, req: SnoozeRequest):
     return {"success": True}
 
 
+@app.post("/send-reply")
+async def send_reply(req: SendReplyRequest):
+    """直接发送回复邮件（不打开 UI），发送成功后更新原邮件 reply_status。"""
+    _check_ready()
+
+    # 获取原邮件
+    source_email = _db.get_email(req.email_id)
+    if not source_email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    # 获取账户
+    accs = _db.get_all_accounts()
+    if not accs:
+        raise HTTPException(status_code=400, detail="No account configured")
+    account = accs[0]
+
+    # 解密密码
+    cred = getattr(_window, "_cred", None)
+    if not cred:
+        raise HTTPException(status_code=503, detail="Credential manager not available")
+    try:
+        password = cred.decrypt_credentials(account.credentials_encrypted)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Failed to decrypt credentials: {e}")
+
+    # 构建收件人
+    from_addr = source_email.from_address or {}
+    to_addresses = [from_addr.get("email", "")]
+    cc_addresses = []
+
+    if req.reply_all:
+        my_email = account.email_address.lower()
+        if source_email.to_addresses:
+            for addr in source_email.to_addresses:
+                e = addr.get("email", "")
+                if e and e.lower() != my_email:
+                    cc_addresses.append(e)
+        if source_email.cc_addresses:
+            for addr in source_email.cc_addresses:
+                e = addr.get("email", "")
+                if e and e.lower() != my_email:
+                    cc_addresses.append(e)
+
+    # 构建主题
+    if req.subject_override:
+        subject = req.subject_override
+    else:
+        original_subject = source_email.subject or ""
+        subject = original_subject if original_subject.lower().startswith("re:") \
+                  else f"Re: {original_subject}"
+
+    # 构建纯文本正文（含引用）
+    from_name = from_addr.get("name", "") or from_addr.get("email", "")
+    date_str = source_email.received_at.strftime("%Y-%m-%d %H:%M") \
+               if source_email.received_at else ""
+    original_body = source_email.body_text or ""
+    quoted_lines = "\n".join(f"> {line}" for line in original_body.splitlines())
+    plain_body = (
+        f"{req.reply_body}\n\n"
+        f"--- 原邮件 ---\n"
+        f"发件人: {from_name}\n"
+        f"日期: {date_str}\n"
+        f"主题: {source_email.subject or ''}\n\n"
+        f"{quoted_lines}"
+    )
+
+    # 构建 HTML 正文
+    reply_html = req.reply_body.replace("\n", "<br>")
+    original_html = source_email.body_html or (
+        original_body.replace("&", "&amp;").replace("<", "&lt;")
+                     .replace(">", "&gt;").replace("\n", "<br>")
+    )
+    html_body = (
+        f"<div>{reply_html}</div>"
+        f"<br>"
+        f'<div style="margin:8px 0;border-left:3px solid #ccc;'
+        f'padding-left:12px;color:#666;">'
+        f"<div>在 {date_str}，{from_name} 写道：</div>"
+        f"<div>{original_html}</div>"
+        f"</div>"
+    )
+
+    # 发送
+    from clawmail.infrastructure.email_clients.smtp_client import ClawSMTPClient, SMTPSendError
+    smtp = ClawSMTPClient()
+    try:
+        await smtp.send_email(
+            account=account,
+            password=password,
+            to_addresses=[a for a in to_addresses if a],
+            subject=subject,
+            body=plain_body,
+            cc_addresses=cc_addresses or None,
+            html_body=html_body,
+        )
+    except SMTPSendError as e:
+        raise HTTPException(status_code=502, detail=f"SMTP send failed: {e}")
+
+    # 更新原邮件 reply_status
+    try:
+        with _db.get_conn() as conn:
+            conn.execute(
+                "UPDATE emails SET reply_status='replied', updated_at=? WHERE id=?",
+                (datetime.utcnow().isoformat(), req.email_id),
+            )
+            conn.commit()
+    except Exception:
+        pass  # 状态更新失败不影响发送结果
+
+    # 通知 UI 刷新
+    if _window:
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: _window._email_list.viewport().update())
+
+    sent_at = datetime.utcnow().isoformat()
+    return {"success": True, "sent_at": sent_at}
+
+
 # ── UI 控制接口 ──
 
 class ClickButtonRequest(BaseModel):
@@ -664,6 +823,94 @@ async def ui_click_button(req: ClickButtonRequest):
     from PyQt6.QtCore import QTimer
     QTimer.singleShot(0, lambda: action(_window))
     return {"success": True}
+
+
+@app.post("/ui/confirm-dialog")
+async def ui_confirm_dialog(req: ConfirmDialogRequest):
+    """弹出确认对话框，等待用户点击后返回 option_id；超时或关闭窗口返回 error。"""
+    _check_ready()
+    if not req.options:
+        raise HTTPException(status_code=400, detail="options cannot be empty")
+
+    loop = asyncio.get_event_loop()
+    future: asyncio.Future = loop.create_future()
+    _dlg_ref: list = [None]   # 用列表持有对话框引用，供超时时关闭
+
+    def _build_and_show():
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        )
+        from PyQt6.QtCore import Qt
+
+        dlg = QDialog(_window)
+        dlg.setWindowTitle(req.title)
+        dlg.setMinimumWidth(360)
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        _dlg_ref[0] = dlg
+
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(20, 16, 20, 16)
+        vbox.setSpacing(12)
+
+        msg_label = QLabel(req.message)
+        msg_label.setTextFormat(Qt.TextFormat.PlainText)
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet("font-size:13px;")
+        vbox.addWidget(msg_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_style = (
+            "QPushButton{padding:5px 14px;border:1px solid #b0b8d0;"
+            "border-radius:4px;background:#eef1f8;font-size:12px;}"
+            "QPushButton:hover{background:#d8e0f4;}"
+        )
+
+        def _make_handler(opt_id):
+            def _handler():
+                if not future.done():
+                    future.set_result(opt_id)
+                dlg.close()
+            return _handler
+
+        for opt in req.options:
+            btn = QPushButton(opt.label)
+            btn.setStyleSheet(btn_style)
+            btn.clicked.connect(_make_handler(opt.id))
+            btn_row.addWidget(btn)
+
+        vbox.addLayout(btn_row)
+
+        def _on_finished():
+            if not future.done():
+                future.set_result(None)
+
+        dlg.finished.connect(_on_finished)
+        dlg.show()
+
+    from PyQt6.QtCore import QTimer
+    QTimer.singleShot(0, _build_and_show)
+
+    try:
+        selected_id = await asyncio.wait_for(
+            asyncio.shield(future), timeout=req.timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        if not future.done():
+            future.set_result(None)
+        dlg = _dlg_ref[0]
+        if dlg:
+            QTimer.singleShot(0, dlg.close)
+        return {"success": False, "error": "timeout", "selected_option_id": None}
+
+    if selected_id is None:
+        return {"success": False, "error": "cancelled", "selected_option_id": None}
+
+    return {
+        "success": True,
+        "selected_option_id": selected_id,
+        "confirmed_at": datetime.utcnow().isoformat(),
+    }
 
 
 # ── 启动函数（供 main.py 调用）──

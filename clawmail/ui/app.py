@@ -664,6 +664,13 @@ class ClawMailApp(QMainWindow):
 
         self._refresh_todo_list()
 
+        # 每 2 分钟自动刷新待办列表（含唤醒打盹任务）
+        from PyQt6.QtCore import QTimer as _QTimerTodo
+        self._todo_auto_timer = _QTimerTodo(self)
+        self._todo_auto_timer.setInterval(2 * 60 * 1000)  # 2 min
+        self._todo_auto_timer.timeout.connect(self._refresh_todo_list)
+        self._todo_auto_timer.start()
+
     def _wrap(self, title: str, widget: QWidget, bg: str) -> QWidget:
         """将内容 widget 包裹在带标题的容器中。"""
         container = QWidget()
@@ -2379,12 +2386,66 @@ class ClawMailApp(QMainWindow):
         menu = QMenu(self)
         edit_act   = menu.addAction("✏ 编辑任务")
         cancel_act = menu.addAction("取消任务")
+        menu.addSeparator()
+        ai_exec_act = menu.addAction("🤖 由AI助手执行")
         act = menu.exec(self._todo_list.mapToGlobal(pos))
         if act == edit_act:
             self._on_todo_edit(task_id)
         elif act == cancel_act:
             self._db.update_task_status(task_id, "cancelled")
             self._refresh_todo_list()
+        elif act == ai_exec_act:
+            self._ctx_ai_execute_task(task_id)
+
+    def _ctx_ai_execute_task(self, task_id: str) -> None:
+        """将待办任务（含关联邮件）打包发送给 AI 助手执行。"""
+        if not self._db:
+            return
+        task = self._db.get_task(task_id)
+        if not task:
+            return
+
+        _PRI = {"high": "高", "medium": "中", "low": "低"}
+        priority_label = _PRI.get(task.priority or "medium", task.priority or "中")
+        due_str = task.due_date.strftime("%Y/%m/%d") if task.due_date else "无"
+
+        lines = [
+            "【待办任务执行请求】",
+            f"标题：{task.title}",
+            f"优先级：{priority_label}",
+            f"截止日期：{due_str}",
+            f"描述：{task.description or '（无）'}",
+            f"分类：{task.category or '（无）'}",
+        ]
+
+        if task.source_email_id:
+            email = self._db.get_email(task.source_email_id)
+            if email:
+                from_info = email.from_address or {}
+                sender = f"{from_info.get('name', '')} <{from_info.get('email', '')}>".strip(" <>")
+                date_str = email.received_at.strftime("%Y/%m/%d %H:%M") if email.received_at else "未知"
+                ai_meta = self._db.get_email_ai_metadata(task.source_email_id)
+                summary = (ai_meta.summary_one_line or ai_meta.summary_brief or "") if ai_meta else ""
+                if not summary:
+                    summary = (email.body_text or "")[:300]
+                lines += [
+                    "",
+                    "【关联邮件】",
+                    f"发件人：{sender}",
+                    f"主题：{email.subject or '（无主题）'}",
+                    f"日期：{date_str}",
+                    f"摘要：{summary}",
+                ]
+
+        lines += ["", "请帮我处理此任务，给出具体操作步骤或直接完成。"]
+        prompt = "\n".join(lines)
+
+        if not self._ai_bridge:
+            QMessageBox.information(self, "AI 未连接", "AI 助手当前未连接，请先检查 OpenClaw 服务。")
+            return
+
+        self._input_line.setText(prompt)
+        self._on_send()
 
     def _on_todo_edit(self, task_id: str) -> None:
         """弹出编辑对话框，允许修改任务的标题、优先级、截止日期、描述、分类。"""

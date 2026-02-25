@@ -42,6 +42,7 @@ class ComposeDialog(QDialog):
                  source_email=None,
                  ai_metadata=None,
                  ai_processor=None,
+                 initial_attachments=None,
                  parent=None):
         super().__init__(parent)
         self._db = db
@@ -63,12 +64,14 @@ class ComposeDialog(QDialog):
         self._selected_stance = None
         self._selected_tone   = None
 
-        # 附件：文件绝对路径列表
-        self._attachments: list = []
+        # 附件：文件绝对路径列表（可由 API 预填）
+        self._attachments: list = list(initial_attachments or [])
 
         self.setWindowTitle("撰写邮件")
         self.setMinimumSize(640, 540 if (initial_html_quote or initial_reply_html) else 440)
         self._build_ui()
+        if self._attachments:
+            self._refresh_attach_ui()
 
         # 60 秒自动保存定时器
         self._auto_save_timer = QTimer(self)
