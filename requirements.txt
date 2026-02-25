@@ -1,0 +1,11 @@
+PyQt6==6.7.1
+PyQt6-WebEngine==6.7.0
+qasync==0.27.1
+aioimaplib==1.1.0
+aiosmtplib==3.0.1
+openai==1.51.0
+httpx==0.27.0
+keyring==25.3.0
+cryptography==43.0.1
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
