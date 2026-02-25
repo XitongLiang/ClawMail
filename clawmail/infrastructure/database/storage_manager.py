@@ -810,6 +810,15 @@ class ClawDB:
             )
             conn.commit()
 
+    def update_account_credentials(self, account_id: str, encrypted: bytes) -> None:
+        """更新账户加密凭据（OAuth token 刷新后调用）。"""
+        with self.get_conn() as conn:
+            conn.execute(
+                "UPDATE accounts SET credentials_encrypted = ?, updated_at = ? WHERE id = ?",
+                (encrypted, datetime.utcnow().isoformat(), account_id),
+            )
+            conn.commit()
+
     def update_account_status(
         self,
         account_id: str,

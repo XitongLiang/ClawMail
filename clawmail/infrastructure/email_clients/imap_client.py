@@ -56,25 +56,41 @@ class ClawIMAPClient:
         except Exception as e:
             raise IMAPConnectionError(f"连接 IMAP 服务器失败: {e}") from e
 
-        status, data = await self._imap.login(account.email_address, password)
-        if status != "OK":
-            msg = data[0].decode() if data else "未知错误"
-            raise IMAPAuthError(f"登录失败: {msg}")
+        if account.provider_type == "microsoft":
+            await self._authenticate_xoauth2(account.email_address, password)
+        else:
+            status, data = await self._imap.login(account.email_address, password)
+            if status != "OK":
+                msg = data[0].decode() if data else "未知错误"
+                raise IMAPAuthError(f"登录失败: {msg}")
 
-        # 163.com 要求登录后发送 IMAP ID 命令，否则 search/fetch 被拒绝
-        # 注意：aioimaplib 的 id(**kwargs) 会在括号内加空格，163.com 拒绝该格式，
-        # 必须直接构造 Command 以确保格式为 ("name" "ClawMail" "version" "1.0")
-        try:
-            from aioimaplib.aioimaplib import Command
-            tag = self._imap.protocol.new_tag()
-            await self._imap.protocol.execute(
-                Command('ID', tag, '("name" "ClawMail" "version" "1.0")',
-                        loop=self._imap.protocol.loop)
-            )
-        except Exception:
-            pass  # 部分服务器不支持 ID，忽略
+        # 163.com 要求登录后发送 IMAP ID 命令，否则 search/fetch 被拒绝。
+        # Microsoft Outlook 不需要此命令，跳过以避免干扰 OAuth 会话。
+        if account.provider_type != "microsoft":
+            try:
+                from aioimaplib.aioimaplib import Command
+                tag = self._imap.protocol.new_tag()
+                await self._imap.protocol.execute(
+                    Command('ID', tag, '("name" "ClawMail" "version" "1.0")',
+                            loop=self._imap.protocol.loop)
+                )
+            except Exception:
+                pass  # 部分服务器不支持 ID，忽略
 
         self._account_id = account.id
+
+    async def _authenticate_xoauth2(self, email: str, access_token: str) -> None:
+        """使用 XOAUTH2 SASL 机制进行 OAuth 认证（Microsoft Outlook）。
+        使用 aioimaplib 内置的 xoauth2() 方法（已针对 Outlook 测试）。
+        """
+        try:
+            response = await self._imap.xoauth2(email, access_token)
+            if response.result != 'OK':
+                raise IMAPAuthError(f"OAuth 认证失败: {response.lines}")
+        except IMAPAuthError:
+            raise
+        except Exception as e:
+            raise IMAPAuthError(f"OAuth 认证失败: {e}") from e
 
     async def disconnect(self) -> None:
         """登出并关闭连接。"""

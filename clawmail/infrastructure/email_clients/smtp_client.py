@@ -3,6 +3,7 @@ ClawSMTPClient — 异步 SMTP 发件客户端
 使用 aiosmtplib 3.0.1，支持 SSL（port 465）。
 """
 
+import base64
 import mimetypes
 import os
 from email import encoders
@@ -79,14 +80,45 @@ class ClawSMTPClient:
         if cc_addresses:
             msg["Cc"] = ", ".join(cc_addresses)
 
+        if account.provider_type == "microsoft":
+            await self._send_oauth(account, password, msg, to_addresses, cc_addresses)
+        else:
+            try:
+                await aiosmtplib.send(
+                    msg,
+                    hostname=account.smtp_server or "smtp.163.com",
+                    port=account.smtp_port or 465,
+                    use_tls=True,
+                    username=account.email_address,
+                    password=password,
+                )
+            except Exception as e:
+                raise SMTPSendError(str(e)) from e
+
+    async def _send_oauth(
+        self,
+        account: Account,
+        access_token: str,
+        msg,
+        to_addresses: list,
+        cc_addresses: list,
+    ) -> None:
+        """使用 XOAUTH2 SASL 通过 STARTTLS 发送邮件（Microsoft Outlook）。"""
+        auth_str = f"user={account.email_address}\x01auth=Bearer {access_token}\x01\x01"
+        b64 = base64.b64encode(auth_str.encode()).decode()
+        recipients = list(to_addresses)
+        if cc_addresses:
+            recipients.extend(cc_addresses)
+
+        smtp = aiosmtplib.SMTP(
+            hostname=account.smtp_server or "smtp.office365.com",
+            port=account.smtp_port or 587,
+        )
         try:
-            await aiosmtplib.send(
-                msg,
-                hostname=account.smtp_server or "smtp.163.com",
-                port=account.smtp_port or 465,
-                use_tls=True,
-                username=account.email_address,
-                password=password,
-            )
+            await smtp.connect()
+            await smtp.starttls()
+            await smtp.docmd("AUTH XOAUTH2", b64)
+            await smtp.sendmail(msg["From"], recipients, msg.as_string())
+            await smtp.quit()
         except Exception as e:
             raise SMTPSendError(str(e)) from e

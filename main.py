@@ -42,6 +42,40 @@ def _load_openclaw_token(data_dir: Path) -> str:
     return _DEFAULT_TOKEN
 
 
+async def _startup(window: ClawMailApp, db: ClawDB, cred_manager: CredentialManager,
+                   ai_bridge: OpenClawBridge) -> None:
+    """
+    账号检查、对话框、同步服务启动。
+    在 loop.run_forever() 之后以协程运行，确保 asyncio 事件循环已就绪，
+    从而支持对话框内的 ensure_future（Microsoft OAuth 设备码流程）。
+    """
+    accounts = db.get_all_accounts()
+    if not accounts:
+        dialog = AccountSetupDialog(db, cred_manager, parent=window)
+        dialog.exec()   # 进入嵌套 Qt 事件循环；qasync 仍会处理 asyncio 回调
+        if dialog.account:
+            accounts = [dialog.account]
+
+    if not accounts:
+        return
+
+    account = accounts[0]
+    window.set_current_account(account.id)
+
+    sync_svc = SyncService(db, cred_manager)
+    window.set_sync_service(sync_svc, account_id=account.id)
+
+    ai_processor = AIProcessor(ai_bridge)
+    ai_svc = AIService(db, ai_processor, move_callback=sync_svc.move_email)
+    window.set_ai_service(ai_svc)
+
+    # 新邮件同步完成后自动入队 AI 处理
+    sync_svc.email_synced.connect(ai_svc.enqueue)
+
+    asyncio.ensure_future(sync_svc.start(account))
+    asyncio.ensure_future(ai_svc.start(account_id=account.id))
+
+
 def main():
     data_dir = Path.home() / "clawmail_data"
     db = ClawDB(data_dir)
@@ -62,29 +96,8 @@ def main():
     api_server.init(window, db)
     asyncio.ensure_future(api_server.start_api_server())
 
-    # 检查是否有已配置账号
-    accounts = db.get_all_accounts()
-    if not accounts:
-        dialog = AccountSetupDialog(db, cred_manager, parent=window)
-        if dialog.exec():
-            accounts = [dialog.account]
-
-    if accounts:
-        account = accounts[0]
-        window.set_current_account(account.id)
-
-        sync_svc = SyncService(db, cred_manager)
-        window.set_sync_service(sync_svc, account_id=account.id)
-
-        ai_processor = AIProcessor(ai_bridge)
-        ai_svc = AIService(db, ai_processor, move_callback=sync_svc.move_email)
-        window.set_ai_service(ai_svc)
-
-        # 新邮件同步完成后自动入队 AI 处理
-        sync_svc.email_synced.connect(ai_svc.enqueue)
-
-        asyncio.ensure_future(sync_svc.start(account))
-        asyncio.ensure_future(ai_svc.start(account_id=account.id))
+    # 账号检查与启动（在事件循环运行后执行，确保 OAuth 流程可用）
+    asyncio.ensure_future(_startup(window, db, cred_manager, ai_bridge))
 
     with loop:
         loop.run_forever()

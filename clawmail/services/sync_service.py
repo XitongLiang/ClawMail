@@ -6,7 +6,18 @@ SyncService — 邮件同步协调器
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional
+
+
+def _dbg(msg: str) -> None:
+    """写调试日志到文件（绕过 conda run 的 stdout 捕获问题）。"""
+    try:
+        log = Path.home() / "clawmail_data" / "sync_debug.log"
+        with open(log, "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -19,8 +30,9 @@ from clawmail.infrastructure.email_clients.imap_client import (
 )
 from clawmail.infrastructure.security.credential_manager import CredentialManager
 
-# 需要同步的文件夹
-SYNC_FOLDERS = ["INBOX", "垃圾邮件", "已发送"]
+# 需要同步的文件夹（按 provider_type 区分）
+SYNC_FOLDERS_DEFAULT = ["INBOX", "垃圾邮件", "已发送"]
+SYNC_FOLDERS_MICROSOFT = ["INBOX", "Junk Email", "Sent Items"]
 
 # 重试配置
 MAX_RETRIES = 3
@@ -93,7 +105,10 @@ class SyncService(QObject):
         """在 IMAP 服务器上移动邮件并更新本地数据库。"""
         if not self._account:
             return False
-        password = self._cred.decrypt_credentials(self._account.credentials_encrypted)
+        if self._account.provider_type == "microsoft":
+            password = await self._get_valid_oauth_token(self._account)
+        else:
+            password = self._cred.decrypt_credentials(self._account.credentials_encrypted)
         imap = ClawIMAPClient(data_dir=self._db.data_dir)
         try:
             await imap.connect(self._account, password)
@@ -108,17 +123,47 @@ class SyncService(QObject):
     # 内部实现
     # ----------------------------------------------------------------
 
+    async def _get_valid_oauth_token(self, account: Account) -> str:
+        """解密 OAuth JSON，必要时刷新令牌，返回有效的 access_token。"""
+        import json
+        from datetime import datetime, timezone, timedelta
+        raw = self._cred.decrypt_credentials(account.credentials_encrypted)
+        data = json.loads(raw)
+        expires_at = datetime.fromisoformat(data["expires_at"])
+        if datetime.now(timezone.utc) >= expires_at - timedelta(minutes=5):
+            from clawmail.infrastructure.auth.microsoft_oauth import refresh_access_token
+            new = await refresh_access_token(data["refresh_token"])
+            data["access_token"] = new["access_token"]
+            data["refresh_token"] = new.get("refresh_token", data["refresh_token"])
+            data["expires_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=new["expires_in"])
+            ).isoformat()
+            new_enc = self._cred.encrypt_credentials(json.dumps(data))
+            self._db.update_account_credentials(account.id, new_enc)
+        return data["access_token"]
+
     async def _do_sync(self, account: Account) -> int:
         """建立 IMAP 连接，同步所有文件夹，返回新邮件总数。"""
-        password = self._cred.decrypt_credentials(account.credentials_encrypted)
+        if account.provider_type == "microsoft":
+            password = await self._get_valid_oauth_token(account)
+        else:
+            password = self._cred.decrypt_credentials(account.credentials_encrypted)
 
+        folders = (SYNC_FOLDERS_MICROSOFT if account.provider_type == "microsoft"
+                   else SYNC_FOLDERS_DEFAULT)
+
+        _dbg(f"_do_sync start provider={account.provider_type} folders={folders}")
         imap = ClawIMAPClient(data_dir=self._db.data_dir)
         try:
             await imap.connect(account, password)
+            _dbg("imap connected OK")
             total = 0
-            for folder in SYNC_FOLDERS:
-                count = await self._sync_folder(account, imap, folder)
-                total += count
+            for folder in folders:
+                try:
+                    count = await self._sync_folder(account, imap, folder)
+                    total += count
+                except (IMAPConnectionError, Exception) as folder_err:
+                    _dbg(f"folder '{folder}' error: {type(folder_err).__name__}: {folder_err}")
             return total
         finally:
             await imap.disconnect()
