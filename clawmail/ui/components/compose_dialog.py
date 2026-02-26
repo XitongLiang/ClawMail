@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from clawmail.infrastructure.email_clients.smtp_client import ClawSMTPClient, SMTPSendError
+from clawmail.ui.theme import get_theme
 
 
 class ComposeDialog(QDialog):
@@ -92,15 +93,28 @@ class ComposeDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(6)
 
+        _field_style = (
+            "border:1px solid palette(mid);border-radius:3px;"
+            "padding:3px 6px;background:palette(base);color:palette(text);"
+        )
+        _std_btn_style = (
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(button);color:palette(button-text);padding:4px 14px;}"
+            "QPushButton:hover{background:palette(midlight);}"
+            "QPushButton:default{border-color:palette(highlight);}"
+        )
         self._to_edit = QLineEdit()
         self._to_edit.setPlaceholderText("多个地址用逗号分隔")
+        self._to_edit.setStyleSheet(_field_style)
         form.addRow("收件人：", self._to_edit)
 
         self._cc_edit = QLineEdit()
         self._cc_edit.setPlaceholderText("可留空，多个地址用逗号分隔")
+        self._cc_edit.setStyleSheet(_field_style)
         form.addRow("抄送：", self._cc_edit)
 
         self._subject_edit = QLineEdit()
+        self._subject_edit.setStyleSheet(_field_style)
         form.addRow("主题：", self._subject_edit)
 
         layout.addLayout(form)
@@ -124,6 +138,10 @@ class ComposeDialog(QDialog):
         else:
             self._body_edit = QTextEdit()
             self._body_edit.setPlaceholderText("在此输入正文…")
+            self._body_edit.setStyleSheet(
+                "border:1px solid palette(mid);border-radius:3px;"
+                "background:palette(base);color:palette(text);"
+            )
             if self._initial_body:
                 self._body_edit.setPlainText(self._initial_body)
             layout.addWidget(self._body_edit, stretch=1)
@@ -145,8 +163,11 @@ class ComposeDialog(QDialog):
         # 按钮行
         self._send_btn = QPushButton("发送")
         self._send_btn.setDefault(True)
+        self._send_btn.setStyleSheet(_std_btn_style)
         self._draft_btn = QPushButton("保存草稿")
+        self._draft_btn.setStyleSheet(_std_btn_style)
         cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet(_std_btn_style)
         cancel_btn.clicked.connect(self.reject)
         self._send_btn.clicked.connect(self._on_send)
         self._draft_btn.clicked.connect(self._on_save_draft)
@@ -288,7 +309,7 @@ class ComposeDialog(QDialog):
             btn = QPushButton(t)
             btn.setCheckable(True)
             btn.setChecked(t == "礼貌")
-            btn.setStyleSheet(self._TOGGLE_BTN_STYLE)
+            btn.setStyleSheet(self._toggle_btn_style())
             btn.setFixedHeight(26)
             self._polish_tone_group.addButton(btn)
             row1.addWidget(btn)
@@ -299,11 +320,12 @@ class ComposeDialog(QDialog):
         row1.addStretch()
 
         self._polish_btn = QPushButton("✨ 润色正文")
+        _ai_btn_disabled = "#3a3a5a" if get_theme().is_dark() else "#aab4d8"
         self._polish_btn.setStyleSheet(
             "QPushButton{background:#4a6cf7;color:#fff;border:none;"
             "border-radius:4px;padding:3px 14px;font-weight:bold;}"
             "QPushButton:hover{background:#3a5ce7;}"
-            "QPushButton:disabled{background:#aab4d8;}"
+            f"QPushButton:disabled{{background:{_ai_btn_disabled};}}"
         )
         self._polish_btn.setFixedHeight(26)
         self._polish_btn.clicked.connect(self._on_polish)
@@ -319,6 +341,10 @@ class ComposeDialog(QDialog):
         self._outline_input.setPlaceholderText(
             "输入几句话大纲，AI 帮你生成完整邮件…"
         )
+        self._outline_input.setStyleSheet(
+            "border:1px solid palette(mid);border-radius:3px;"
+            "padding:1px 6px;background:palette(base);color:palette(text);"
+        )
         self._outline_input.setFixedHeight(26)
         row2.addWidget(self._outline_input)
 
@@ -327,7 +353,7 @@ class ComposeDialog(QDialog):
             "QPushButton{background:#22a85a;color:#fff;border:none;"
             "border-radius:4px;padding:3px 14px;font-weight:bold;}"
             "QPushButton:hover{background:#1a9050;}"
-            "QPushButton:disabled{background:#aab4d8;}"
+            f"QPushButton:disabled{{background:{_ai_btn_disabled};}}"
         )
         self._gen_email_btn.setFixedHeight(26)
         self._gen_email_btn.clicked.connect(self._on_generate_email)
@@ -402,13 +428,17 @@ class ComposeDialog(QDialog):
     # AI 辅助拟稿面板
     # ----------------------------------------------------------------
 
-    _TOGGLE_BTN_STYLE = (
-        "QPushButton{border:1px solid palette(mid);border-radius:4px;"
-        "padding:3px 10px;background:palette(button);color:palette(button-text);}"
-        "QPushButton:checked{background:#4a6cf7;color:#fff;"
-        "border-color:#4a6cf7;}"
-        "QPushButton:hover:!checked{background:palette(midlight);}"
-    )
+    @staticmethod
+    def _toggle_btn_style() -> str:
+        _t = get_theme()
+        checked_bg = "#1e3870" if _t.is_dark() else "#4a6cf7"
+        return (
+            "QPushButton{border:1px solid palette(mid);border-radius:4px;"
+            "padding:3px 10px;background:palette(button);color:palette(button-text);}"
+            f"QPushButton:checked{{background:{checked_bg};color:#e8f0ff;"
+            f"border-color:{checked_bg};}}"
+            "QPushButton:hover:!checked{background:palette(midlight);}"
+        )
 
     def _build_ai_draft_panel(self, parent_layout):
         box = QGroupBox("✨ AI 辅助拟稿")
@@ -430,7 +460,7 @@ class ComposeDialog(QDialog):
         for s in self._ai_metadata.reply_stances:
             btn = QPushButton(s)
             btn.setCheckable(True)
-            btn.setStyleSheet(self._TOGGLE_BTN_STYLE)
+            btn.setStyleSheet(self._toggle_btn_style())
             self._stance_group.addButton(btn)
             stance_row.addWidget(btn)
             btn.clicked.connect(
@@ -454,7 +484,7 @@ class ComposeDialog(QDialog):
         for t in ["正式", "礼貌", "轻松", "简短"]:
             btn = QPushButton(t)
             btn.setCheckable(True)
-            btn.setStyleSheet(self._TOGGLE_BTN_STYLE)
+            btn.setStyleSheet(self._toggle_btn_style())
             self._tone_group.addButton(btn)
             tone_row.addWidget(btn)
             btn.clicked.connect(
@@ -471,16 +501,21 @@ class ComposeDialog(QDialog):
         self._notes_input.setPlaceholderText(
             "例：强调时间紧迫，需对方尽快确认"
         )
+        self._notes_input.setStyleSheet(
+            "border:1px solid palette(mid);border-radius:3px;"
+            "padding:2px 6px;background:palette(base);color:palette(text);"
+        )
         self._notes_input.hide()
 
         gen_row = QHBoxLayout()
         gen_row.addStretch()
         self._gen_btn = QPushButton("✨ 生成草稿")
+        _dis = "#3a3a5a" if get_theme().is_dark() else "#aab4d8"
         self._gen_btn.setStyleSheet(
             "QPushButton{background:#4a6cf7;color:#fff;border:none;"
             "border-radius:4px;padding:4px 14px;font-weight:bold;}"
             "QPushButton:hover{background:#3a5ce7;}"
-            "QPushButton:disabled{background:#aab4d8;}"
+            f"QPushButton:disabled{{background:{_dis};}}"
         )
         self._gen_btn.hide()
         self._gen_btn.clicked.connect(self._on_generate_draft)
@@ -766,19 +801,24 @@ class ComposeDialog(QDialog):
     async def _send_async(self, to_addresses, cc_addresses, subject, body,
                           html_body=None, attachments=None):
         try:
-            password = self._cred.decrypt_credentials(
-                self._account.credentials_encrypted
-            )
-            await self._smtp.send_email(
-                account=self._account,
-                password=password,
-                to_addresses=to_addresses,
-                subject=subject,
-                body=body,
-                cc_addresses=cc_addresses,
-                html_body=html_body,
-                attachments=attachments,
-            )
+            if self._account.provider_type == "microsoft":
+                await self._send_via_graph(
+                    to_addresses, cc_addresses, subject, body, html_body, attachments
+                )
+            else:
+                password = self._cred.decrypt_credentials(
+                    self._account.credentials_encrypted
+                )
+                await self._smtp.send_email(
+                    account=self._account,
+                    password=password,
+                    to_addresses=to_addresses,
+                    subject=subject,
+                    body=body,
+                    cc_addresses=cc_addresses,
+                    html_body=html_body,
+                    attachments=attachments,
+                )
             self._auto_save_timer.stop()
             if self._draft_id and self._db:
                 self._db.delete_email(self._draft_id)
@@ -824,3 +864,45 @@ class ComposeDialog(QDialog):
             self._status_label.setText("")
             self._send_btn.setEnabled(True)
             QMessageBox.critical(self, "发送失败", str(e))
+
+    async def _send_via_graph(self, to_addresses, cc_addresses, subject, body,
+                              html_body, attachments):
+        """通过 Microsoft Graph API 发送邮件（替代 SMTP）。"""
+        import json
+        from datetime import datetime, timezone, timedelta
+        from clawmail.infrastructure.email_clients.graph_client import GraphSyncClient
+
+        # 解密 OAuth JSON
+        raw = self._cred.decrypt_credentials(self._account.credentials_encrypted)
+        data = json.loads(raw)
+
+        # 必要时刷新令牌
+        expires_at = datetime.fromisoformat(data["expires_at"])
+        if datetime.now(timezone.utc) >= expires_at - timedelta(minutes=5):
+            from clawmail.infrastructure.auth.microsoft_graph_oauth import refresh_access_token
+            loop = asyncio.get_event_loop()
+            new = await refresh_access_token(data["refresh_token"])
+            data["access_token"] = new["access_token"]
+            data["refresh_token"] = new.get("refresh_token", data["refresh_token"])
+            data["expires_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=new["expires_in"])
+            ).isoformat()
+            if self._db:
+                new_enc = self._cred.encrypt_credentials(json.dumps(data))
+                self._db.update_account_credentials(self._account.id, new_enc)
+
+        access_token = data["access_token"]
+        graph = GraphSyncClient()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            graph.send_message,
+            access_token,
+            self._account.email_address,
+            to_addresses,
+            subject,
+            body,
+            cc_addresses,
+            html_body,
+            attachments,
+        )

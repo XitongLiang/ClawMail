@@ -874,12 +874,15 @@ async def ui_confirm_dialog(req: ConfirmDialogRequest):
         msg_label.setStyleSheet("font-size:13px;")
         vbox.addWidget(msg_label)
 
+        from clawmail.ui.theme import get_theme as _get_theme
+        _bt = _get_theme()
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn_style = (
-            "QPushButton{padding:5px 14px;border:1px solid #b0b8d0;"
-            "border-radius:4px;background:#eef1f8;font-size:12px;}"
-            "QPushButton:hover{background:#d8e0f4;}"
+            f"QPushButton{{padding:5px 14px;border:1px solid {_bt.dialog_btn_border()};"
+            f"border-radius:4px;background:{_bt.dialog_btn_bg()};font-size:12px;"
+            f"color:palette(button-text);}}"
+            f"QPushButton:hover{{background:{_bt.dialog_btn_hover()};}}"
         )
 
         def _make_handler(opt_id):
