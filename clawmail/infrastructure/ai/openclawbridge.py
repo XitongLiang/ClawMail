@@ -4,7 +4,6 @@ OpenClawBridge — AI 服务统一接口
 设计规范：design/tech_spec.md OpenClawBridge 节
 """
 
-import httpx
 from openai import OpenAI
 
 
@@ -24,13 +23,7 @@ class OpenClawBridge:
         model: str = "default",
     ):
         self.model = model
-        # trust_env=False prevents httpx from picking up macOS/system proxy settings
-        # (e.g. Clash/V2Ray on 127.0.0.1:7890) which intercept localhost requests and return 502.
-        self.client = OpenAI(
-            api_key=token,
-            base_url=base_url,
-            http_client=httpx.Client(trust_env=False),
-        )
+        self.client = OpenAI(api_key=token, base_url=base_url)
 
     def process_email(
         self,
