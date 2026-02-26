@@ -21,6 +21,8 @@ def _to_cst(dt: datetime) -> datetime:
 from PyQt6.QtCore import QEvent, Qt, QDate, QSize, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QDesktopServices, QFont
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+
+from clawmail.ui.theme import get_theme
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
@@ -30,17 +32,25 @@ from PyQt6.QtWidgets import (
 )
 
 
-# 注入到所有邮件 HTML 的响应式 CSS：图片宽度自适应，防止横向溢出，支持深色模式
-_RESPONSIVE_CSS = (
-    "<style>"
-    "img{max-width:100%!important;height:auto!important;}"
-    "body{overflow-x:hidden!important;}"
-    "@media(prefers-color-scheme:dark){"
-    "body{background:#1e1e1e!important;color:#ddd!important;}"
-    "a{color:#7aafff!important;}"
-    "}"
-    "</style>"
-)
+def _get_responsive_css() -> str:
+    """Return a <style> block injected into every email HTML.
+    Uses the app theme (not OS media query) so it stays in sync with our toggle."""
+    if get_theme().is_dark():
+        return (
+            "<style>"
+            "img{max-width:100%!important;height:auto!important;}"
+            "body{overflow-x:hidden!important;"
+            "background:#1e1e1e!important;color:#d4d4d4!important;}"
+            "a{color:#569cd6!important;}"
+            "blockquote{border-left-color:#555!important;}"
+            "</style>"
+        )
+    return (
+        "<style>"
+        "img{max-width:100%!important;height:auto!important;}"
+        "body{overflow-x:hidden!important;}"
+        "</style>"
+    )
 
 
 class EmailListDelegate(QStyledItemDelegate):
@@ -56,7 +66,6 @@ class EmailListDelegate(QStyledItemDelegate):
     _PAD   = 6        # 上下 padding
 
     _STRIPE_W     = 3
-    _UNREAD_BG    = QColor("#EEF5FF")
     _STRIPE_COLOR = QColor("#2196F3")
 
     # 分类标签颜色映射
@@ -95,19 +104,20 @@ class EmailListDelegate(QStyledItemDelegate):
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_unread   = index.data(Qt.ItemDataRole.UserRole + 4) or False
 
+        _theme = get_theme()
         # 背景填充
         if is_selected:
             painter.fillRect(option.rect, option.palette.highlight())
             fg  = option.palette.highlightedText().color()
             dim = fg
         elif is_unread:
-            painter.fillRect(option.rect, self._UNREAD_BG)
+            painter.fillRect(option.rect, _theme.unread_bg())
             fg  = option.palette.text().color()
-            dim = QColor("#999999")
+            dim = _theme.dim_color()
         else:
             painter.fillRect(option.rect, option.palette.base())
             fg  = option.palette.text().color()
-            dim = QColor("#999999")
+            dim = _theme.dim_color()
 
         # 未读蓝色左侧竖条
         if is_unread and not is_selected:
@@ -132,8 +142,8 @@ class EmailListDelegate(QStyledItemDelegate):
         time_str = index.data(Qt.ItemDataRole.UserRole + 3) or ""
 
         if is_draft and not is_selected:
-            fg  = QColor("#888888")
-            dim = QColor("#aaaaaa")
+            fg  = _theme.draft_fg()
+            dim = _theme.draft_dim()
 
         x = option.rect.x() + self._PAD
         y = option.rect.y() + self._PAD
@@ -316,11 +326,12 @@ class _FbStarBar(QWidget):
 
     def _render(self, filled: int, hover: int):
         active = max(filled, hover)
+        clr_off = "#555555" if get_theme().is_dark() else self._CLR_OFF
         for i, btn in enumerate(self._btns, 1):
             if i <= active:
                 clr = self._CLR_HOVER if (hover > 0 and i <= hover) else self._CLR_ON
             else:
-                clr = self._CLR_OFF
+                clr = clr_off
             btn.setStyleSheet(
                 f"QPushButton{{border:none;background:transparent;"
                 f"font-size:22px;color:{clr};padding:0;}}"
@@ -370,6 +381,7 @@ class ClawMailApp(QMainWindow):
         self._ai_chat_mode: str = "user_chat"
         self._feedback_email_id: Optional[str] = None
         self._feedback_meta = None
+        self._account_btn = None  # account switcher button in toolbar
         self._init_ui()
         self._ai_chat_mode = self._load_config().get("ai_chat_mode", "user_chat")
 
@@ -380,6 +392,14 @@ class ClawMailApp(QMainWindow):
     def _init_ui(self):
         self.setWindowTitle("ClawMail")
         self.resize(1200, 700)
+
+        # Initialise theme: detect system preference, then apply saved override
+        _tm = get_theme()
+        _tm.init()
+        _saved_theme = self._load_config().get("theme", "system")
+        if _saved_theme in ("light", "dark"):
+            _tm.set_mode(_saved_theme)
+        _tm.theme_changed.connect(self._apply_theme_styles)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -505,9 +525,10 @@ class ClawMailApp(QMainWindow):
         self._filter_toggle_btn.setFixedSize(22, 22)
         self._filter_toggle_btn.setToolTip("高级筛选")
         self._filter_toggle_btn.setCheckable(True)
+        _theme = get_theme()
         self._filter_toggle_btn.setStyleSheet(
             "QPushButton{border:1px solid palette(mid);border-radius:3px;background:palette(midlight);font-size:11px;}"
-            "QPushButton:checked{background:#c5d0f5;border-color:#8899dd;}"
+            f"QPushButton:checked{{background:{_theme.filter_checked_bg()};border-color:{_theme.filter_checked_border()};}}"
         )
         self._filter_toggle_btn.clicked.connect(self._on_filter_toggle)
         _srch_h.addWidget(self._filter_toggle_btn)
@@ -584,8 +605,8 @@ class ClawMailApp(QMainWindow):
         _fp_apply = QPushButton("应用")
         _fp_apply.setFixedSize(44, 22)
         _fp_apply.setStyleSheet(
-            "QPushButton{background:#5c7cfa;color:#fff;border:none;border-radius:3px;font-size:11px;}"
-            "QPushButton:hover{background:#4a67e0;}"
+            f"QPushButton{{background:{get_theme().primary_btn_bg()};color:#fff;border:none;border-radius:3px;font-size:11px;}}"
+            f"QPushButton:hover{{background:{get_theme().primary_btn_hover()};}}"
         )
         _fp_apply.clicked.connect(self._on_search_submit)
         _fp_row2.addWidget(_fp_apply)
@@ -605,6 +626,11 @@ class ClawMailApp(QMainWindow):
 
         # Right2：邮件内容（QWebEngineView — 完整浏览器渲染）
         self._content_view = EmailWebView()
+        # Set background colour so there is no white flash before HTML loads and
+        # so the empty-state matches the current theme.  Must be done after the
+        # view is created but before the first setHtml() call.
+        _cv_bg = QColor("#1e1e1e") if get_theme().is_dark() else QColor("#ffffff")
+        self._content_view.page().setBackgroundColor(_cv_bg)
         self._content_view.setHtml(
             "<p>选择一封邮件查看内容</p>", QUrl("file:///")
         )
@@ -646,18 +672,21 @@ class ClawMailApp(QMainWindow):
         _cp_vbox.addWidget(self._content_view, stretch=1)
 
         # ── AI 摘要反馈面板（星评分） ──
+        _fb_theme = get_theme()
         self._feedback_widget = QFrame()
         self._feedback_widget.setStyleSheet(
-            "QFrame{background:#f5f7ff;border-top:1px solid #c5cae9;}"
+            f"QFrame{{background:{_fb_theme.feedback_bg()};border-top:1px solid {_fb_theme.feedback_border()};}}"
         )
         self._feedback_widget.setVisible(False)
         _fb_vbox = QVBoxLayout(self._feedback_widget)
         _fb_vbox.setContentsMargins(14, 8, 14, 10)
         _fb_vbox.setSpacing(6)
 
-        _fb_title = QLabel("对 AI 摘要评分：")
-        _fb_title.setStyleSheet("font-size:12px;color:#3a4a9a;font-weight:bold;")
-        _fb_vbox.addWidget(_fb_title)
+        self._fb_title = QLabel("对 AI 摘要评分：")
+        self._fb_title.setStyleSheet(
+            f"font-size:12px;color:{_fb_theme.feedback_title_color()};font-weight:bold;"
+        )
+        _fb_vbox.addWidget(self._fb_title)
 
         _fb_star_row = QHBoxLayout()
         _fb_star_row.setSpacing(4)
@@ -670,23 +699,25 @@ class ClawMailApp(QMainWindow):
         self._fb_comment_edit.setPlaceholderText("填写反馈意见（可选）…")
         self._fb_comment_edit.setFixedHeight(58)
         self._fb_comment_edit.setStyleSheet(
-            "font-size:12px;border:1px solid #c5cae9;border-radius:3px;"
+            f"font-size:12px;border:1px solid {_fb_theme.feedback_border()};border-radius:3px;"
         )
         self._fb_comment_edit.setVisible(False)
         _fb_vbox.addWidget(self._fb_comment_edit)
 
-        _fb_submit_btn = QPushButton("提交")
-        _fb_submit_btn.setFixedHeight(26)
-        _fb_submit_btn.setEnabled(False)
-        _fb_submit_btn.setStyleSheet(
-            "QPushButton{border:1px solid #9fa8da;border-radius:3px;"
-            "background:#e8ecfa;color:#3a4a9a;font-size:11px;padding:2px 14px;}"
-            "QPushButton:hover{background:#d0d8f5;}"
-            "QPushButton:disabled{color:#aaa;border-color:#ccc;background:#f5f5f5;}"
+        self._fb_submit_btn = QPushButton("提交")
+        self._fb_submit_btn.setFixedHeight(26)
+        self._fb_submit_btn.setEnabled(False)
+        self._fb_submit_btn.setStyleSheet(
+            f"QPushButton{{border:1px solid {_fb_theme.feedback_btn_border()};border-radius:3px;"
+            f"background:{_fb_theme.feedback_btn_bg()};color:{_fb_theme.feedback_title_color()};font-size:11px;padding:2px 14px;}}"
+            f"QPushButton:hover{{background:{_fb_theme.feedback_btn_hover()};}}"
+            f"QPushButton:disabled{{color:{_fb_theme.feedback_btn_disabled_fg()};"
+            f"border-color:{_fb_theme.feedback_btn_disabled_border()};"
+            f"background:{_fb_theme.feedback_btn_disabled_bg()};}}"
         )
         _fb_btn_row = QHBoxLayout()
         _fb_btn_row.addStretch()
-        _fb_btn_row.addWidget(_fb_submit_btn)
+        _fb_btn_row.addWidget(self._fb_submit_btn)
         _fb_vbox.addLayout(_fb_btn_row)
 
         _cp_vbox.addWidget(self._feedback_widget)
@@ -695,10 +726,10 @@ class ClawMailApp(QMainWindow):
         self._fb_star_bar.rating_selected.connect(
             lambda _: (
                 self._fb_comment_edit.setVisible(True),
-                _fb_submit_btn.setEnabled(True),
+                self._fb_submit_btn.setEnabled(True),
             )
         )
-        _fb_submit_btn.clicked.connect(self._on_feedback_submit)
+        self._fb_submit_btn.clicked.connect(self._on_feedback_submit)
 
         splitter.addWidget(_content_panel)
 
@@ -733,9 +764,9 @@ class ClawMailApp(QMainWindow):
         self._ai_reconnect_btn.setToolTip("重新连接 AI")
         self._ai_reconnect_btn.setFixedSize(28, 28)
         self._ai_reconnect_btn.setStyleSheet(
-            "border:none; border-bottom:1px solid #bfc9da;"
-            "background:#e4eaf6; color:#666; font-size:13px; padding:0;"
-            "QPushButton:hover{background:#d0d9ef;}"
+            "QPushButton{border:none; border-bottom:1px solid palette(mid);"
+            "background:palette(button); color:palette(button-text); font-size:13px; padding:0;}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
         self._ai_reconnect_btn.clicked.connect(self._on_ai_reconnect)
         _ai_hdr.addWidget(_ai_title, stretch=1)
@@ -764,6 +795,10 @@ class ClawMailApp(QMainWindow):
         toolbar_hbox = QHBoxLayout(toolbar)
         toolbar_hbox.setContentsMargins(8, 3, 8, 3)
         toolbar_hbox.setSpacing(6)
+        # Account switcher (left-most toolbar element)
+        self._account_btn = self._build_account_btn()
+        toolbar_hbox.addWidget(self._account_btn)
+
         compose_btn = QPushButton("✉ 撰写")
         compose_btn.setStyleSheet(_top_btn_style)
         compose_btn.clicked.connect(self._on_compose)
@@ -777,6 +812,17 @@ class ClawMailApp(QMainWindow):
         toolbar_hbox.addWidget(settings_btn)
         toolbar_hbox.addWidget(sync_btn)
         toolbar_hbox.addStretch()
+
+        # Theme toggle button (☀ Light / 🌙 Dark)
+        _is_dark_now = get_theme().is_dark()
+        self._theme_btn = QPushButton("🌙 Dark" if _is_dark_now else "☀ Light")
+        self._theme_btn.setCheckable(True)
+        self._theme_btn.setChecked(_is_dark_now)
+        self._theme_btn.setFixedHeight(24)
+        self._theme_btn.setStyleSheet(_top_btn_style)
+        self._theme_btn.setToolTip("Switch between light and dark mode")
+        self._theme_btn.clicked.connect(self._on_theme_toggle)
+        toolbar_hbox.addWidget(self._theme_btn)
 
         central = QWidget()
         central_vbox = QVBoxLayout(central)
@@ -852,6 +898,194 @@ class ClawMailApp(QMainWindow):
     def set_ai_bridge(self, bridge) -> None:
         """注入 OpenClawBridge 实例。"""
         self._ai_bridge = bridge
+
+    # ----------------------------------------------------------------
+    # Account switcher — toolbar button + menu
+    # ----------------------------------------------------------------
+
+    _AVATAR_PALETTE = [
+        "#1565C0", "#6A1B9A", "#00695C", "#AD1457",
+        "#E65100", "#2E7D32", "#4527A0", "#00838F",
+    ]
+
+    def _avatar_color(self, email: str) -> str:
+        return self._AVATAR_PALETTE[hash(email) % len(self._AVATAR_PALETTE)]
+
+    def _make_avatar_pixmap(self, email: str, size: int = 20) -> "QPixmap":
+        from PyQt6.QtGui import QPixmap, QPainter, QFont
+        initials = (email[:2] if email else "?").upper()
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        from PyQt6.QtCore import QRectF
+        color = QColor(self._avatar_color(email))
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(0, 0, size, size)
+        p.setPen(QColor("#ffffff"))
+        f = QFont()
+        f.setBold(True)
+        f.setPointSize(max(6, size // 3))
+        p.setFont(f)
+        p.drawText(
+            0, 0, size, size,
+            Qt.AlignmentFlag.AlignCenter,
+            initials,
+        )
+        p.end()
+        return px
+
+    def _build_account_btn(self) -> QPushButton:
+        btn = QPushButton("👤  No account  ▼")
+        btn.setFixedHeight(24)
+        btn.setStyleSheet(
+            "QPushButton{font-size:11px;padding:2px 10px;"
+            "border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(window);text-align:left;}"
+            "QPushButton:pressed{background:palette(midlight);}"
+            "QPushButton:menu-indicator{width:0;}"
+        )
+        btn.clicked.connect(self._on_account_menu)
+        return btn
+
+    def _refresh_account_btn(self):
+        if not self._account_btn:
+            return
+        if self._current_account:
+            email = self._current_account.email_address
+            short = email if len(email) <= 22 else email[:20] + "…"
+            initials = email[:2].upper()
+            px = self._make_avatar_pixmap(email, 16)
+            from PyQt6.QtGui import QIcon
+            self._account_btn.setIcon(QIcon(px))
+            self._account_btn.setIconSize(px.size())
+            self._account_btn.setText(f"  {short}  ▼")
+        else:
+            self._account_btn.setIcon(QIcon())
+            self._account_btn.setText("👤  No account  ▼")
+
+    def _on_account_menu(self):
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction, QIcon
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:palette(base);border:1px solid palette(mid);padding:4px;}"
+            "QMenu::item{padding:6px 20px 6px 10px;font-size:12px;}"
+            "QMenu::item:selected{background:palette(highlight);color:palette(highlighted-text);}"
+            "QMenu::separator{height:1px;background:palette(mid);margin:4px 0;}"
+        )
+
+        accounts = self._db.get_all_accounts() if self._db else []
+        for acc in accounts:
+            px = self._make_avatar_pixmap(acc.email_address, 16)
+            action = QAction(QIcon(px), acc.email_address, menu)
+            if acc.id == self._current_account_id:
+                f = action.font()
+                f.setBold(True)
+                action.setFont(f)
+                action.setText(f"✓  {acc.email_address}")
+            action.triggered.connect(lambda checked, aid=acc.id: self.switch_to_account(aid))
+            menu.addAction(action)
+
+        menu.addSeparator()
+
+        add_action = QAction("＋  Add Account", menu)
+        add_action.triggered.connect(self._on_add_account)
+        menu.addAction(add_action)
+
+        if self._current_account_id:
+            remove_action = QAction("✕  Remove Current Account", menu)
+            remove_action.triggered.connect(
+                lambda: self._on_remove_account(self._current_account_id)
+            )
+            menu.addAction(remove_action)
+
+        btn_pos = self._account_btn.mapToGlobal(
+            self._account_btn.rect().bottomLeft()
+        )
+        menu.exec(btn_pos)
+
+    def _on_add_account(self):
+        from clawmail.ui.components.account_setup_dialog import AccountSetupDialog
+        dialog = AccountSetupDialog(self._db, self._cred, parent=self)
+        if dialog.exec() and dialog.account:
+            self.switch_to_account(dialog.account.id)
+
+    def _on_remove_account(self, account_id: str):
+        from PyQt6.QtWidgets import QMessageBox
+        accounts = self._db.get_all_accounts() if self._db else []
+        target = next((a for a in accounts if a.id == account_id), None)
+        if not target:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Remove Account",
+            f"Remove {target.email_address} from ClawMail?\n\nLocal email data will also be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Stop services for this account
+        if self._sync_service and account_id == self._current_account_id:
+            self._sync_service.stop()
+            self._sync_service = None
+
+        try:
+            self._db.delete_account(account_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to remove account: {e}")
+            return
+
+        # Switch to another account or clear state
+        remaining = [a for a in accounts if a.id != account_id]
+        if remaining:
+            self.switch_to_account(remaining[0].id)
+        else:
+            self._current_account_id = None
+            self._current_account = None
+            self._refresh_account_btn()
+            self._email_list.clear()
+            self._content_view.setHtml("<p>No accounts configured.</p>", QUrl("file:///"))
+
+    def switch_to_account(self, account_id: str) -> None:
+        """Public method: stop current services, switch account, restart services."""
+        if account_id == self._current_account_id:
+            return
+        if self._sync_service:
+            self._sync_service.stop()
+            self._sync_service = None
+        if self._ai_service:
+            self._ai_service = None
+        self.set_current_account(account_id)
+        self._refresh_account_btn()
+        asyncio.ensure_future(self._restart_services(account_id))
+
+    async def _restart_services(self, account_id: str) -> None:
+        """Async: create and start SyncService + AIService for the given account."""
+        if not self._db or not self._cred:
+            return
+        accounts = self._db.get_all_accounts()
+        account = next((a for a in accounts if a.id == account_id), None)
+        if not account:
+            return
+
+        from clawmail.services.sync_service import SyncService
+        from clawmail.services.ai_service import AIService
+        from clawmail.infrastructure.ai.ai_processor import AIProcessor
+
+        sync_svc = SyncService(self._db, self._cred)
+        self.set_sync_service(sync_svc, account_id=account_id)
+
+        if self._ai_bridge:
+            ai_processor = AIProcessor(self._ai_bridge)
+            ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
+            self.set_ai_service(ai_svc)
+            sync_svc.email_synced.connect(ai_svc.enqueue)
+            asyncio.ensure_future(ai_svc.start(account_id=account_id))
+
+        asyncio.ensure_future(sync_svc.start(account))
 
     # ----------------------------------------------------------------
     # 信号处理
@@ -1136,16 +1370,18 @@ class ClawMailApp(QMainWindow):
             "email_id": email_id,
             "subject": email.subject or "",
         })
+        _th = get_theme()
         _add_todo_btn = (
             f"<a href='clawmail-todo://add-email?{_add_email_params}' "
             f"style='display:inline-block;margin-top:6px;font-size:11px;"
-            f"text-decoration:none;"
-            f"padding:2px 9px;border:1px solid #888;border-radius:3px;"
+            f"text-decoration:none;color:{_th.html_link_color()};"
+            f"padding:2px 9px;border:1px solid {_th.html_header_border()};border-radius:3px;"
             f"'>📝 加入待办</a>"
         )
         header_html = (
             f"<div style='font-family:sans-serif;font-size:13px;"
-            f"padding:10px 14px;border-bottom:1px solid #888;'>"
+            f"color:{_th.html_text()};"
+            f"padding:10px 14px;border-bottom:1px solid {_th.html_header_border()};'>"
             f"<b>{_esc(email.subject or '')}</b><br>"
             f"发件人：{_esc(from_str)}<br>"
             f"时间：{_esc(date_str)}<br>"
@@ -1183,9 +1419,11 @@ class ClawMailApp(QMainWindow):
                         err_detail = (
                             f" <span style='color:#aaa'>({_html_mod.escape(meta.processing_error[:80])})</span>"
                         )
+                    _wt = get_theme()
                     ai_panel_html = (
-                        "<div style='padding:6px 14px;background:#fff8e1;"
-                        "border-bottom:1px solid #ffe082;font-size:12px;color:#795548'>"
+                        f"<div style='padding:6px 14px;background:{_wt.html_warning_bg()};"
+                        f"border-bottom:1px solid {_wt.html_warning_border()};"
+                        f"font-size:12px;color:{_wt.html_warning_text()}'>"
                         f"⚠️ AI 分析失败，将在下次启动时重试{err_detail}</div>"
                     )
         else:
@@ -1211,9 +1449,11 @@ class ClawMailApp(QMainWindow):
                 f"📎 {_esc(att['filename'])} ({_fmt_size(att['size_bytes'] or 0)})</a>"
                 for att in attachments
             )
+            _at = get_theme()
             html += (
-                f"<div style='padding:10px 14px;background:palette(window);"
-                f"border-top:1px solid #888;font-size:12px'>"
+                f"<div style='padding:10px 14px;background:{_at.html_panel_bg()};"
+                f"color:{_at.html_text()};"
+                f"border-top:1px solid {_at.html_header_border()};font-size:12px'>"
                 f"<b>附件：</b>{items}</div>"
             )
 
@@ -1224,12 +1464,13 @@ class ClawMailApp(QMainWindow):
 
     async def _display_email_async(self, html: str) -> None:
         """注入响应式 CSS，交由 WebEngine 渲染（自动加载外链图片）。"""
+        css = _get_responsive_css()
         if re.search(r'</head>', html, re.IGNORECASE):
             html = re.sub(
-                r'(</head>)', _RESPONSIVE_CSS + r'\1', html, count=1, flags=re.IGNORECASE
+                r'(</head>)', css + r'\1', html, count=1, flags=re.IGNORECASE
             )
         else:
-            html = _RESPONSIVE_CSS + html
+            html = css + html
         self._content_view.setHtml(html, QUrl("file:///"))
 
     def _on_manual_sync(self):
@@ -1338,13 +1579,25 @@ class ClawMailApp(QMainWindow):
         form.setContentsMargins(16, 16, 16, 16)
         form.setSpacing(10)
 
+        _dlg_input_style = (
+            "border:1px solid palette(mid);border-radius:3px;"
+            "padding:2px 6px;background:palette(base);color:palette(text);"
+        )
+        _dlg_btn_style = (
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(button);color:palette(button-text);padding:2px 8px;}"
+            "QPushButton:hover{background:palette(midlight);}"
+            "QPushButton:checked{background:palette(highlight);color:palette(highlighted-text);}"
+        )
         token_edit = QLineEdit(current_token)
         token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         token_edit.setPlaceholderText("OpenClaw API Token")
+        token_edit.setStyleSheet(_dlg_input_style)
 
         show_btn = QPushButton("显示")
         show_btn.setFixedWidth(50)
         show_btn.setCheckable(True)
+        show_btn.setStyleSheet(_dlg_btn_style)
 
         def _toggle_echo(checked):
             token_edit.setEchoMode(
@@ -1424,10 +1677,11 @@ class ClawMailApp(QMainWindow):
         form.addRow(logout_btn)
 
         # ---- 数据管理 ----
+        _s = get_theme()
         section_label = QLabel("数据管理")
         section_label.setStyleSheet(
-            "font-weight:bold; font-size:11px; "
-            "padding-top:10px; border-top:1px solid palette(mid); margin-top:6px;"
+            f"color:{_s.settings_section_color()}; font-weight:bold; font-size:11px; "
+            f"padding-top:10px; border-top:1px solid {_s.settings_section_border()}; margin-top:6px;"
         )
         form.addRow(section_label)
 
@@ -1532,8 +1786,8 @@ class ClawMailApp(QMainWindow):
         # ---- AI 助手 ----
         ai_chat_section = QLabel("AI 助手")
         ai_chat_section.setStyleSheet(
-            "color:#555; font-weight:bold; font-size:11px; "
-            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+            f"color:{get_theme().settings_section_color()}; font-weight:bold; font-size:11px; "
+            f"padding-top:10px; border-top:1px solid {get_theme().settings_section_border()}; margin-top:6px;"
         )
         form.addRow(ai_chat_section)
 
@@ -1541,13 +1795,17 @@ class ClawMailApp(QMainWindow):
         mode_combo.addItem("用户对话 (user_chat)", "user_chat")
         mode_combo.addItem("邮件助手 (mail_chat)", "mail_chat")
         mode_combo.setCurrentIndex(0 if self._ai_chat_mode == "user_chat" else 1)
+        mode_combo.setStyleSheet(
+            "border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(button);color:palette(button-text);padding:2px 6px;"
+        )
         form.addRow("聊天模式：", mode_combo)
 
         # ---- AI 分析 ----
         ai_section_label = QLabel("AI 分析")
         ai_section_label.setStyleSheet(
-            "color:#555; font-weight:bold; font-size:11px; "
-            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+            f"color:{get_theme().settings_section_color()}; font-weight:bold; font-size:11px; "
+            f"padding-top:10px; border-top:1px solid {get_theme().settings_section_border()}; margin-top:6px;"
         )
         form.addRow(ai_section_label)
 
@@ -1562,6 +1820,7 @@ class ClawMailApp(QMainWindow):
             _inbox_count = 0
 
         ai_inbox_btn = QPushButton(f"🤖 一键 AI 分析收件箱（{_inbox_count} 封）")
+        ai_inbox_btn.setStyleSheet(_dlg_btn_style)
 
         def _on_ai_all_inbox():
             if not self._ai_bridge:
@@ -1618,6 +1877,77 @@ class ClawMailApp(QMainWindow):
         # 持久化到 config.json
         self._save_config({"openclaw_token": new_token})
         self._status_bar.showMessage("✅ 设置已保存", 3000)
+
+    # ----------------------------------------------------------------
+    # Theme toggle
+    # ----------------------------------------------------------------
+
+    def _on_theme_toggle(self) -> None:
+        """Toggle between light and dark mode and persist the choice."""
+        tm = get_theme()
+        new_mode = "dark" if not tm.is_dark() else "light"
+        tm.set_mode(new_mode)
+        self._save_config({"theme": new_mode})
+
+    def _apply_theme_styles(self, _theme_name: str = "") -> None:
+        """Re-apply theme-sensitive hard-coded styles after a theme change."""
+        tm = get_theme()
+
+        # Toolbar toggle button label
+        if hasattr(self, "_theme_btn"):
+            self._theme_btn.blockSignals(True)
+            self._theme_btn.setChecked(tm.is_dark())
+            self._theme_btn.setText("🌙 Dark" if tm.is_dark() else "☀ Light")
+            self._theme_btn.blockSignals(False)
+
+        # QWebEngineView has its own background colour independent of QPalette —
+        # update it so emails don't show a white background in dark mode.
+        if hasattr(self, "_content_view") and self._content_view:
+            _bg = QColor("#1e1e1e") if tm.is_dark() else QColor("#ffffff")
+            self._content_view.page().setBackgroundColor(_bg)
+
+        # AI feedback panel
+        if hasattr(self, "_feedback_widget") and self._feedback_widget:
+            self._feedback_widget.setStyleSheet(
+                f"QFrame{{background:{tm.feedback_bg()};border-top:1px solid {tm.feedback_border()};}}"
+            )
+        if hasattr(self, "_fb_title") and self._fb_title:
+            self._fb_title.setStyleSheet(
+                f"font-size:12px;color:{tm.feedback_title_color()};font-weight:bold;"
+            )
+        if hasattr(self, "_fb_comment_edit") and self._fb_comment_edit:
+            self._fb_comment_edit.setStyleSheet(
+                f"font-size:12px;border:1px solid {tm.feedback_border()};border-radius:3px;"
+            )
+        if hasattr(self, "_fb_submit_btn") and self._fb_submit_btn:
+            self._fb_submit_btn.setStyleSheet(
+                f"QPushButton{{border:1px solid {tm.feedback_btn_border()};border-radius:3px;"
+                f"background:{tm.feedback_btn_bg()};color:{tm.feedback_title_color()};font-size:11px;padding:2px 14px;}}"
+                f"QPushButton:hover{{background:{tm.feedback_btn_hover()};}}"
+                f"QPushButton:disabled{{color:{tm.feedback_btn_disabled_fg()};"
+                f"border-color:{tm.feedback_btn_disabled_border()};"
+                f"background:{tm.feedback_btn_disabled_bg()};}}"
+            )
+
+        # Star bar
+        if hasattr(self, "_fb_star_bar") and self._fb_star_bar:
+            self._fb_star_bar._render(self._fb_star_bar.get_rating(), 0)
+
+        # Filter toggle checked state
+        if hasattr(self, "_filter_toggle_btn") and self._filter_toggle_btn:
+            self._filter_toggle_btn.setStyleSheet(
+                "QPushButton{border:1px solid palette(mid);border-radius:3px;background:palette(midlight);font-size:11px;}"
+                f"QPushButton:checked{{background:{tm.filter_checked_bg()};border-color:{tm.filter_checked_border()};}}"
+            )
+
+        # Force list viewport repaints (for delegate custom painting)
+        if hasattr(self, "_email_list") and self._email_list:
+            self._email_list.viewport().update()
+
+        # Re-render the currently viewed email so header/AI panel pick up new colors
+        if (hasattr(self, "_email_list") and self._email_list
+                and self._email_list.currentItem()):
+            self._on_email_selected(self._email_list.currentItem(), None)
 
     # ----------------------------------------------------------------
     # 邮件列表右键菜单
@@ -1976,9 +2306,11 @@ class ClawMailApp(QMainWindow):
         label = "转发邮件" if is_forward else "原始邮件"
         to_str = _html_mod.escape(self._current_account.email_address if self._current_account else "")
 
+        _qt = get_theme()
         header_html = (
-            "<div style='font-family:sans-serif;font-size:12px;"
-            "border-top:1px solid #ccc;padding-top:6px;margin-top:16px'>"
+            f"<div style='font-family:sans-serif;font-size:12px;"
+            f"color:{_qt.html_text()};"
+            f"border-top:1px solid {_qt.html_quote_border()};padding-top:6px;margin-top:16px'>"
             f"---------- {label} ----------<br>"
             f"发件人: {from_str_esc}<br>"
             f"发送时间: {_html_mod.escape(date_str)}<br>"
@@ -2017,29 +2349,42 @@ class ClawMailApp(QMainWindow):
 
     def _build_ai_summary_html(self, meta) -> str:
         """生成邮件详情顶部的 AI 摘要面板 HTML。"""
+        _t = get_theme()
+        _text   = _t.html_text()
+        _dim    = _t.html_dim()
+        _panel  = _t.html_panel_bg()
+        _border = _t.html_panel_border()
+        _label  = _t.html_section_label()
+        _link   = _t.html_link_color()
+
         parts = []
         if meta.summary_brief:
             brief_esc = _html_mod.escape(meta.summary_brief).replace("\n", "<br>")
             parts.append(
-                f"<div style='margin-bottom:6px;color:#333;font-size:13px'>"
+                f"<div style='margin-bottom:6px;color:{_text};font-size:13px'>"
                 f"{brief_esc}</div>"
             )
         if meta.summary_key_points:
             items = "".join(
-                f"<li style='margin:2px 0'>{_html_mod.escape(p)}</li>"
+                f"<li style='margin:2px 0;color:{_text}'>{_html_mod.escape(p)}</li>"
                 for p in meta.summary_key_points
             )
-            parts.append(f"<ul style='margin:0 0 6px 16px;padding:0'>{items}</ul>")
+            parts.append(f"<ul style='margin:0 0 6px 16px;padding:0;color:{_text}'>{items}</ul>")
         if meta.categories:
+            # Use vibrant accent colors for badges; "subscription" (#757575) gets a brighter
+            # variant in dark mode for legibility.
             badges = ""
             for cat in meta.categories:
-                label, color = self._CAT_LABEL.get(cat, (cat, "#607D8B"))
+                lbl, color = self._CAT_LABEL.get(cat, (cat, "#607D8B"))
+                # Make subscription/fallback badge brighter in dark mode
+                if _t.is_dark() and color in ("#757575", "#607D8B"):
+                    color = "#9e9e9e"
                 badges += (
                     f"<span style='display:inline-block;margin:2px 4px 2px 0;"
                     f"padding:1px 7px;border-radius:10px;"
-                    f"background:{color}22;color:{color};"
-                    f"font-size:11px;border:1px solid {color}66'>"
-                    f"{_html_mod.escape(label)}</span>"
+                    f"background:{color}33;color:{color};"
+                    f"font-size:11px;border:1px solid {color}88'>"
+                    f"{_html_mod.escape(lbl)}</span>"
                 )
             parts.append(f"<div style='margin-top:2px'>{badges}</div>")
 
@@ -2054,10 +2399,10 @@ class ClawMailApp(QMainWindow):
                 if not text:
                     continue
                 pri = item.get("priority", "medium")
-                pri_color = _PRI_COLORS.get(pri, "#888")
+                pri_color = _PRI_COLORS.get(pri, _dim)
                 deadline = item.get("deadline") or ""
                 dl_str = (
-                    f" <span style='color:#888;font-size:11px'>{_html_mod.escape(deadline)}</span>"
+                    f" <span style='color:{_dim};font-size:11px'>{_html_mod.escape(deadline)}</span>"
                     if deadline and deadline != "null" else ""
                 )
                 import urllib.parse as _up
@@ -2071,23 +2416,23 @@ class ClawMailApp(QMainWindow):
                 })
                 add_link = (
                     f"<a href='clawmail-todo://add?{params}' "
-                    f"style='font-size:11px;text-decoration:none;"
-                    f"padding:1px 6px;border:1px solid #888;border-radius:3px;"
+                    f"style='font-size:11px;text-decoration:none;color:{_link};"
+                    f"padding:1px 6px;border:1px solid {_dim};border-radius:3px;"
                     f"white-space:nowrap'>＋ 加入待办</a>"
                 )
                 rows += (
                     f"<tr>"
                     f"<td style='padding:3px 6px 3px 0;color:{pri_color};font-size:12px'>"
                     f"{'🔴' if pri=='high' else '🟡' if pri=='medium' else '🟢'}</td>"
-                    f"<td style='padding:3px 8px 3px 0;font-size:12px;color:#333'>"
+                    f"<td style='padding:3px 8px 3px 0;font-size:12px;color:{_text}'>"
                     f"{text}{dl_str}</td>"
                     f"<td style='padding:3px 0;white-space:nowrap'>{add_link}</td>"
                     f"</tr>"
                 )
             if rows:
                 parts.append(
-                    "<div style='margin-top:6px;border-top:1px solid #c5cae9;padding-top:6px'>"
-                    "<div style='font-size:11px;color:#7986cb;font-weight:bold;margin-bottom:4px'>"
+                    f"<div style='margin-top:6px;border-top:1px solid {_border};padding-top:6px'>"
+                    f"<div style='font-size:11px;color:{_label};font-weight:bold;margin-bottom:4px'>"
                     "📋 AI 检测到的待办</div>"
                     f"<table style='border-collapse:collapse;width:100%'>{rows}</table>"
                     "</div>"
@@ -2097,10 +2442,10 @@ class ClawMailApp(QMainWindow):
             return ""
         body = "".join(parts)
         return (
-            "<div style='padding:10px 14px;background:palette(button);"
-            "border-bottom:1px solid #c5cae9;font-family:sans-serif'>"
-            "<div style='font-size:11px;color:#7986cb;font-weight:bold;"
-            "margin-bottom:6px'>🤖 AI 分析</div>"
+            f"<div style='padding:10px 14px;background:{_panel};"
+            f"border-bottom:1px solid {_border};font-family:sans-serif'>"
+            f"<div style='font-size:11px;color:{_label};font-weight:bold;"
+            f"margin-bottom:6px'>🤖 AI 分析</div>"
             f"{body}"
             "</div>"
         )
@@ -2430,6 +2775,7 @@ class ClawMailApp(QMainWindow):
         if self._db:
             accs = self._db.get_all_accounts()
             self._current_account = next((a for a in accs if a.id == account_id), None)
+        self._refresh_account_btn()
         self.refresh_email_list(self._current_folder)
         self._refresh_category_list()
         self._refresh_urgency_list()
@@ -2532,12 +2878,15 @@ class ClawMailApp(QMainWindow):
         self._todo_search_input.setStyleSheet(_input_style)
         self._todo_search_input.textChanged.connect(self._refresh_todo_list)
         toolbar.addWidget(self._todo_search_input, stretch=2)
+        _cb_style = "border:1px solid palette(mid);border-radius:3px;padding:1px 4px;font-size:11px;"
         self._todo_filter_cat = QComboBox()
         self._todo_filter_cat.addItems(["全部", "工作", "生活", "学习", "个人"])
+        self._todo_filter_cat.setStyleSheet(_cb_style)
         self._todo_filter_cat.currentTextChanged.connect(self._refresh_todo_list)
         toolbar.addWidget(self._todo_filter_cat, stretch=1)
         self._todo_sort_combo = QComboBox()
         self._todo_sort_combo.addItems(["分组顺序", "优先级", "截止日期"])
+        self._todo_sort_combo.setStyleSheet(_cb_style)
         self._todo_sort_combo.currentTextChanged.connect(self._refresh_todo_list)
         toolbar.addWidget(self._todo_sort_combo, stretch=1)
         vbox.addLayout(toolbar)
@@ -3006,9 +3355,18 @@ class ClawMailApp(QMainWindow):
         input_row.setSpacing(4)
         self._input_line = QLineEdit()
         self._input_line.setPlaceholderText("输入消息，按回车发送…")
+        self._input_line.setStyleSheet(
+            "border:1px solid palette(mid);border-radius:3px;"
+            "padding:2px 6px;background:palette(base);color:palette(text);"
+        )
         self._input_line.returnPressed.connect(self._on_send)
         self._send_btn = QPushButton("发送")
         self._send_btn.setFixedWidth(52)
+        self._send_btn.setStyleSheet(
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(button);color:palette(button-text);padding:2px 8px;}"
+            "QPushButton:hover{background:palette(midlight);}"
+        )
         self._send_btn.clicked.connect(self._on_send)
         input_row.addWidget(self._input_line)
         input_row.addWidget(self._send_btn)
@@ -3124,16 +3482,17 @@ class ClawMailApp(QMainWindow):
     def _append_user_message(self, text: str) -> None:
         safe = _html_mod.escape(text).replace("\n", "<br>")
         time_str = datetime.now().strftime("%H:%M")
+        _t = get_theme()
         self._chat_history.append(
             "<table width='100%' cellspacing='0' cellpadding='0' style='margin:3px 0'>"
             "<tr>"
             "  <td width='20%'></td>"
-            f"  <td align='right'><font size='1' color='#aaaaaa'>{time_str}</font></td>"
+            f"  <td align='right'><font size='1' color='{_t.chat_timestamp_color()}'>{time_str}</font></td>"
             "</tr>"
             "<tr>"
             "  <td width='20%'></td>"
-            "  <td bgcolor='#4a90d9' style='padding:6px 10px'>"
-            f"    <font color='#ffffff'>{safe}</font>"
+            f"  <td bgcolor='{_t.chat_user_bg()}' style='padding:6px 10px'>"
+            f"    <font color='{_t.chat_user_fg()}'>{safe}</font>"
             "  </td>"
             "</tr>"
             "</table>"
@@ -3142,15 +3501,16 @@ class ClawMailApp(QMainWindow):
     def _append_ai_message(self, text: str) -> None:
         safe = _html_mod.escape(text).replace("\n", "<br>")
         time_str = datetime.now().strftime("%H:%M")
+        _t = get_theme()
         self._chat_history.append(
             "<table width='100%' cellspacing='0' cellpadding='0' style='margin:3px 0'>"
             "<tr>"
-            f"  <td align='left'><font size='1' color='#aaaaaa'>{time_str}</font></td>"
+            f"  <td align='left'><font size='1' color='{_t.chat_timestamp_color()}'>{time_str}</font></td>"
             "  <td width='20%'></td>"
             "</tr>"
             "<tr>"
-            "  <td bgcolor='#e8e8e8' style='padding:6px 10px'>"
-            f"    <font color='#222222'>{safe}</font>"
+            f"  <td bgcolor='{_t.chat_ai_bg()}' style='padding:6px 10px'>"
+            f"    <font color='{_t.chat_ai_fg()}'>{safe}</font>"
             "  </td>"
             "  <td width='20%'></td>"
             "</tr>"

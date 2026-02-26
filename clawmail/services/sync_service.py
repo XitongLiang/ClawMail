@@ -28,11 +28,16 @@ from clawmail.infrastructure.email_clients.imap_client import (
     IMAPAuthError,
     IMAPConnectionError,
 )
+from clawmail.infrastructure.email_clients.graph_client import (
+    GraphSyncClient,
+    GraphAuthError,
+    GRAPH_FOLDERS,
+    GRAPH_FOLDER_ID_MAP,
+)
 from clawmail.infrastructure.security.credential_manager import CredentialManager
 
-# 需要同步的文件夹（按 provider_type 区分）
+# 需要同步的文件夹（非 Microsoft 账号）
 SYNC_FOLDERS_DEFAULT = ["INBOX", "垃圾邮件", "已发送"]
-SYNC_FOLDERS_MICROSOFT = ["INBOX", "Junk Email", "Sent Items"]
 
 # 重试配置
 MAX_RETRIES = 3
@@ -71,6 +76,8 @@ class SyncService(QObject):
         """执行一次完整同步，返回新邮件总数。出错时返回 0 并发射 sync_error。"""
         self.sync_started.emit()
 
+        auth_error_types = (IMAPAuthError, GraphAuthError)
+
         for attempt in range(MAX_RETRIES):
             try:
                 total = await self._do_sync(account)
@@ -78,7 +85,7 @@ class SyncService(QObject):
                 self._db.update_account_status(account.id, "active")
                 return total
 
-            except IMAPAuthError as e:
+            except auth_error_types as e:
                 # 认证错误不重试
                 self._db.update_account_status(account.id, "error", str(e))
                 self.sync_error.emit(f"认证失败：{e}")
@@ -102,19 +109,27 @@ class SyncService(QObject):
     async def move_email(
         self, email_id: str, imap_uid: str, from_folder: str, to_folder: str
     ) -> bool:
-        """在 IMAP 服务器上移动邮件并更新本地数据库。"""
+        """移动邮件并更新本地数据库（Microsoft 用 Graph，其他用 IMAP）。"""
         if not self._account:
             return False
+
         if self._account.provider_type == "microsoft":
-            password = await self._get_valid_oauth_token(self._account)
+            access_token = await self._get_valid_oauth_token(self._account)
+            dest_id = GRAPH_FOLDER_ID_MAP.get(to_folder, to_folder)
+            loop = asyncio.get_event_loop()
+            graph = GraphSyncClient()
+            moved = await loop.run_in_executor(
+                None, graph.move_message, access_token, imap_uid, dest_id
+            )
         else:
             password = self._cred.decrypt_credentials(self._account.credentials_encrypted)
-        imap = ClawIMAPClient(data_dir=self._db.data_dir)
-        try:
-            await imap.connect(self._account, password)
-            moved = await imap.move_email(imap_uid, from_folder, to_folder)
-        finally:
-            await imap.disconnect()
+            imap = ClawIMAPClient(data_dir=self._db.data_dir)
+            try:
+                await imap.connect(self._account, password)
+                moved = await imap.move_email(imap_uid, from_folder, to_folder)
+            finally:
+                await imap.disconnect()
+
         if moved:
             self._db.update_email_folder(email_id, to_folder)
         return moved
@@ -131,7 +146,7 @@ class SyncService(QObject):
         data = json.loads(raw)
         expires_at = datetime.fromisoformat(data["expires_at"])
         if datetime.now(timezone.utc) >= expires_at - timedelta(minutes=5):
-            from clawmail.infrastructure.auth.microsoft_oauth import refresh_access_token
+            from clawmail.infrastructure.auth.microsoft_graph_oauth import refresh_access_token
             new = await refresh_access_token(data["refresh_token"])
             data["access_token"] = new["access_token"]
             data["refresh_token"] = new.get("refresh_token", data["refresh_token"])
@@ -143,22 +158,18 @@ class SyncService(QObject):
         return data["access_token"]
 
     async def _do_sync(self, account: Account) -> int:
-        """建立 IMAP 连接，同步所有文件夹，返回新邮件总数。"""
+        """同步所有文件夹，Microsoft 走 Graph API，其他走 IMAP。"""
+        _dbg(f"_do_sync start provider={account.provider_type}")
         if account.provider_type == "microsoft":
-            password = await self._get_valid_oauth_token(account)
-        else:
-            password = self._cred.decrypt_credentials(account.credentials_encrypted)
+            return await self._do_sync_graph(account)
 
-        folders = (SYNC_FOLDERS_MICROSOFT if account.provider_type == "microsoft"
-                   else SYNC_FOLDERS_DEFAULT)
-
-        _dbg(f"_do_sync start provider={account.provider_type} folders={folders}")
+        password = self._cred.decrypt_credentials(account.credentials_encrypted)
         imap = ClawIMAPClient(data_dir=self._db.data_dir)
         try:
             await imap.connect(account, password)
             _dbg("imap connected OK")
             total = 0
-            for folder in folders:
+            for folder in SYNC_FOLDERS_DEFAULT:
                 try:
                     count = await self._sync_folder(account, imap, folder)
                     total += count
@@ -167,6 +178,55 @@ class SyncService(QObject):
             return total
         finally:
             await imap.disconnect()
+
+    async def _do_sync_graph(self, account: Account) -> int:
+        """通过 Microsoft Graph API 增量同步邮件。"""
+        access_token = await self._get_valid_oauth_token(account)
+        graph = GraphSyncClient(data_dir=self._db.data_dir)
+        cursor = self._get_cursor(account)
+        loop = asyncio.get_event_loop()
+        total = 0
+
+        for folder_id, folder_display in GRAPH_FOLDERS:
+            try:
+                delta_link = cursor.get(folder_display)
+                _dbg(f"Graph sync folder={folder_display} has_delta={bool(delta_link)}")
+
+                results, new_delta = await loop.run_in_executor(
+                    None,
+                    graph.fetch_folder_delta,
+                    access_token,
+                    folder_id,
+                    delta_link,
+                    account.id,
+                    folder_display,
+                )
+
+                for email, attachments in results:
+                    self._db.save_email(email)
+                    for att in attachments:
+                        self._db.save_attachment(
+                            email_id=email.id,
+                            filename=att["filename"],
+                            content_type=att["content_type"],
+                            size_bytes=att["size_bytes"],
+                            storage_path=att["storage_path"],
+                        )
+                    self.email_synced.emit(email.id)
+                    total += 1
+
+                if new_delta:
+                    cursor[folder_display] = new_delta
+                    self._db.update_account_sync_cursor(account.id, json.dumps(cursor))
+
+                _dbg(f"Graph folder={folder_display} synced {len(results)} emails")
+
+            except GraphAuthError:
+                raise
+            except Exception as e:
+                _dbg(f"Graph folder '{folder_display}' error: {type(e).__name__}: {e}")
+
+        return total
 
     async def _sync_folder(
         self, account: Account, imap: ClawIMAPClient, folder: str

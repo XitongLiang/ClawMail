@@ -17,11 +17,8 @@ import qasync
 from PyQt6.QtWidgets import QApplication
 
 from clawmail.infrastructure.ai.openclawbridge import OpenClawBridge
-from clawmail.infrastructure.ai.ai_processor import AIProcessor
 from clawmail.infrastructure.database.storage_manager import ClawDB
 from clawmail.infrastructure.security.credential_manager import CredentialManager
-from clawmail.services.sync_service import SyncService
-from clawmail.services.ai_service import AIService
 from clawmail.ui.app import ClawMailApp
 from clawmail.ui.components.account_setup_dialog import AccountSetupDialog
 from clawmail.api import server as api_server
@@ -60,20 +57,11 @@ async def _startup(window: ClawMailApp, db: ClawDB, cred_manager: CredentialMana
         return
 
     account = accounts[0]
+    # set_current_account sets _current_account_id and refreshes the account button
     window.set_current_account(account.id)
-
-    sync_svc = SyncService(db, cred_manager)
-    window.set_sync_service(sync_svc, account_id=account.id)
-
-    ai_processor = AIProcessor(ai_bridge)
-    ai_svc = AIService(db, ai_processor, move_callback=sync_svc.move_email)
-    window.set_ai_service(ai_svc)
-
-    # 新邮件同步完成后自动入队 AI 处理
-    sync_svc.email_synced.connect(ai_svc.enqueue)
-
-    asyncio.ensure_future(sync_svc.start(account))
-    asyncio.ensure_future(ai_svc.start(account_id=account.id))
+    # Start services via the shared helper so _on_add_account and switch_to_account
+    # all use the same code path.
+    await window._restart_services(account.id)
 
 
 def main():
@@ -85,6 +73,20 @@ def main():
     app = QApplication(sys.argv)
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
+
+    # Set application icon from SVG logo
+    _logo_path = Path(__file__).parent / "clawmail" / "ui" / "assets" / "logo.svg"
+    if _logo_path.exists():
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtSvg import QSvgRenderer
+        from PyQt6.QtGui import QIcon, QPixmap, QPainter
+        _renderer = QSvgRenderer(str(_logo_path))
+        _px = QPixmap(64, 64)
+        _px.fill(_Qt.GlobalColor.transparent)
+        _p = QPainter(_px)
+        _renderer.render(_p)
+        _p.end()
+        app.setWindowIcon(QIcon(_px))
 
     ai_bridge = OpenClawBridge(token=_load_openclaw_token(data_dir))
 

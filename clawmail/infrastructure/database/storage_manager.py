@@ -386,6 +386,13 @@ class ClawDB:
             ).fetchone()
             return self._row_to_account(row) if row else None
 
+    def delete_account(self, account_id: str) -> None:
+        """Delete an account and all its associated emails."""
+        with self.get_conn() as conn:
+            conn.execute("DELETE FROM emails WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            conn.commit()
+
     def _row_to_account(self, row: sqlite3.Row) -> Account:
         d = dict(row)
         d["is_enabled"] = bool(d["is_enabled"])
