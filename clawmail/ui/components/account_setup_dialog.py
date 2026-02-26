@@ -258,7 +258,7 @@ class AccountSetupDialog(QDialog):
         url_label_prefix.setStyleSheet("font-size: 12px;")
         self._oauth_url_label = QLabel("https://microsoft.com/devicelogin")
         self._oauth_url_label.setStyleSheet(
-            "font-size: 12px; color: #0078D4; text-decoration: underline;"
+            "font-size: 12px; color: palette(link); text-decoration: underline;"
         )
         self._oauth_url_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse

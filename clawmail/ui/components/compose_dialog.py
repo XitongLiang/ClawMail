@@ -139,7 +139,7 @@ class ComposeDialog(QDialog):
 
         # 状态提示
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#888; font-size:11px;")
+        self._status_label.setStyleSheet("font-size:11px;")
         layout.addWidget(self._status_label)
 
         # 按钮行
@@ -171,9 +171,9 @@ class ComposeDialog(QDialog):
     def _build_attach_bar(self, layout):
         """附件区：添加按钮 + 文件名标签行（动态显示）。"""
         _attach_style = (
-            "QPushButton{border:1px solid #b8c4d8;border-radius:3px;"
-            "background:#eef1fa;padding:1px 8px;font-size:11px;color:#3a4a7a;}"
-            "QPushButton:hover{background:#dce4f5;}"
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(button);padding:1px 8px;font-size:11px;color:palette(button-text);}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
         # 行1：添加附件按钮 + 附件数量提示
         row = QHBoxLayout()
@@ -184,7 +184,7 @@ class ComposeDialog(QDialog):
         _add_btn.clicked.connect(self._on_add_attachment)
         row.addWidget(_add_btn)
         self._attach_count_label = QLabel("")
-        self._attach_count_label.setStyleSheet("font-size:11px; color:#888;")
+        self._attach_count_label.setStyleSheet("font-size:11px;")
         row.addWidget(self._attach_count_label)
         row.addStretch()
         layout.addLayout(row)
@@ -231,7 +231,7 @@ class ComposeDialog(QDialog):
 
             chip = QWidget()
             chip.setStyleSheet(
-                "background:#e8f0fe; border:1px solid #b8c8f0;"
+                "background:palette(button); border:1px solid palette(mid);"
                 "border-radius:10px;"
             )
             ch = QHBoxLayout(chip)
@@ -240,7 +240,7 @@ class ComposeDialog(QDialog):
 
             lbl = QLabel(f"📄 {display}")
             lbl.setStyleSheet(
-                "font-size:11px; color:#2c4a9a; background:transparent; border:none;"
+                "font-size:11px; background:transparent; border:none;"
             )
             lbl.setToolTip(path)
 
@@ -269,7 +269,7 @@ class ComposeDialog(QDialog):
     def _build_polish_bar(self, parent_layout):
         bar = QWidget()
         bar.setStyleSheet(
-            "background:#f5f7fb;border:1px solid #dde3ef;border-radius:5px;"
+            "background:palette(window);border:1px solid palette(mid);border-radius:5px;"
         )
         vbox = QVBoxLayout(bar)
         vbox.setContentsMargins(10, 6, 10, 6)
@@ -403,17 +403,17 @@ class ComposeDialog(QDialog):
     # ----------------------------------------------------------------
 
     _TOGGLE_BTN_STYLE = (
-        "QPushButton{border:1px solid #c0c8d8;border-radius:4px;"
-        "padding:3px 10px;background:#f5f7fb;}"
+        "QPushButton{border:1px solid palette(mid);border-radius:4px;"
+        "padding:3px 10px;background:palette(button);color:palette(button-text);}"
         "QPushButton:checked{background:#4a6cf7;color:#fff;"
         "border-color:#4a6cf7;}"
-        "QPushButton:hover:!checked{background:#e8eeff;}"
+        "QPushButton:hover:!checked{background:palette(midlight);}"
     )
 
     def _build_ai_draft_panel(self, parent_layout):
         box = QGroupBox("✨ AI 辅助拟稿")
         box.setStyleSheet(
-            "QGroupBox{font-weight:bold;border:1px solid #dde3ef;"
+            "QGroupBox{font-weight:bold;border:1px solid palette(mid);"
             "border-radius:6px;margin-top:6px;padding:8px;}"
             "QGroupBox::title{subcontrol-origin:margin;left:10px;"
             "padding:0 4px;}"
@@ -567,25 +567,29 @@ class ComposeDialog(QDialog):
         return (
             "<!DOCTYPE html><html><head><meta charset='utf-8'>"
             "<style>"
-            "body{margin:0;padding:0;font-family:sans-serif;font-size:13px;background:#fff}"
+            "body{margin:0;padding:0;font-family:sans-serif;font-size:13px;}"
             "#reply-area{"
             "min-height:120px;"
-            "padding:14px 16px 10px;outline:none;background:#fff;"
+            "padding:14px 16px 10px;outline:none;"
             "white-space:pre-wrap;word-break:break-word;"
             "}"
             "#reply-area:empty::before{"
-            "content:attr(data-placeholder);color:#bbb;"
+            "content:attr(data-placeholder);color:#999;"
             "pointer-events:none;display:block"
             "}"
             "#quote-divider{"
             "margin:0 16px;"
-            "border:none;border-top:1px solid #ddd;"
+            "border:none;border-top:1px solid #888;"
             "}"
             "#quote-area{"
             "padding:10px 16px 16px;"
-            "font-family:sans-serif;font-size:13px;color:#555;"
+            "font-family:sans-serif;font-size:13px;opacity:0.75;"
             "}"
             "img{max-width:100%!important;height:auto!important}"
+            "@media(prefers-color-scheme:dark){"
+            "body{background:#1e1e1e;color:#ddd;}"
+            "#reply-area{background:#1e1e1e;}"
+            "}"
             "</style></head><body>"
             "<div id='reply-area' contenteditable='true' "
             "data-placeholder='在此输入回复内容…'>"

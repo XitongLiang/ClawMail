@@ -30,11 +30,15 @@ from PyQt6.QtWidgets import (
 )
 
 
-# 注入到所有邮件 HTML 的响应式 CSS：图片宽度自适应，防止横向溢出
+# 注入到所有邮件 HTML 的响应式 CSS：图片宽度自适应，防止横向溢出，支持深色模式
 _RESPONSIVE_CSS = (
     "<style>"
     "img{max-width:100%!important;height:auto!important;}"
     "body{overflow-x:hidden!important;}"
+    "@media(prefers-color-scheme:dark){"
+    "body{background:#1e1e1e!important;color:#ddd!important;}"
+    "a{color:#7aafff!important;}"
+    "}"
     "</style>"
 )
 
@@ -394,50 +398,50 @@ class ClawMailApp(QMainWindow):
             self._folder_list.addItem(_fi)
         self._folder_list.setCurrentRow(0)
         self._folder_list.currentTextChanged.connect(self._on_folder_changed)
-        self._folder_list.setStyleSheet("background:#f5f5f5; border:none; padding:4px;")
+        self._folder_list.setStyleSheet("background:palette(window); border:none; padding:4px;")
 
         # AI 分类标签列表
         self._category_list = QListWidget()
         self._category_list.setStyleSheet(
-            "background:#f5f5f5; border:none; padding:4px;"
+            "background:palette(window); border:none; padding:4px;"
         )
         self._category_list.currentItemChanged.connect(self._on_category_changed)
 
         # AI 紧急度列表
         self._urgency_list = QListWidget()
         self._urgency_list.setStyleSheet(
-            "background:#f5f5f5; border:none; padding:4px;"
+            "background:palette(window); border:none; padding:4px;"
         )
         self._urgency_list.currentItemChanged.connect(self._on_urgency_changed)
 
         left_panel = QWidget()
-        left_panel.setStyleSheet("background:#f5f5f5;")
+        left_panel.setStyleSheet("background:palette(window);")
         left_vbox = QVBoxLayout(left_panel)
         left_vbox.setContentsMargins(0, 0, 0, 0)
         left_vbox.setSpacing(0)
 
         folder_header = QLabel("📁 文件夹")
         folder_header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-bottom:1px solid #bfc9da; background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-bottom:1px solid palette(mid); background:palette(button);"
         )
         left_vbox.addWidget(folder_header)
         left_vbox.addWidget(self._folder_list)
 
         category_header = QLabel("🏷️ AI 分类")
         category_header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-top:1px solid #bfc9da; border-bottom:1px solid #bfc9da;"
-            "background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-top:1px solid palette(mid); border-bottom:1px solid palette(mid);"
+            "background:palette(button);"
         )
         left_vbox.addWidget(category_header)
         left_vbox.addWidget(self._category_list)
 
         urgency_header = QLabel("⚡ 紧急度")
         urgency_header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-top:1px solid #bfc9da; border-bottom:1px solid #bfc9da;"
-            "background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-top:1px solid palette(mid); border-bottom:1px solid palette(mid);"
+            "background:palette(button);"
         )
         left_vbox.addWidget(urgency_header)
         left_vbox.addWidget(self._urgency_list)
@@ -446,23 +450,23 @@ class ClawMailApp(QMainWindow):
 
         # Left2：邮件列表
         self._email_list = QListWidget()
-        self._email_list.setStyleSheet("background:#fafafa; border:none;")
+        self._email_list.setStyleSheet("background:palette(base); border:none;")
         self._email_list.setItemDelegate(EmailListDelegate(self._email_list))
         _email_panel = QWidget()
-        _email_panel.setStyleSheet("background:#fafafa;")
+        _email_panel.setStyleSheet("background:palette(base);")
         _ep_vbox = QVBoxLayout(_email_panel)
         _ep_vbox.setContentsMargins(0, 0, 0, 0)
         _ep_vbox.setSpacing(0)
         self._email_list_header = QLabel("📧 邮件列表")
         self._email_list_header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-bottom:1px solid #bfc9da; background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-bottom:1px solid palette(mid); background:palette(button);"
         )
         _ep_vbox.addWidget(self._email_list_header)
 
         # 搜索栏（嵌入邮件列表面板内）
         _srch_row = QWidget()
-        _srch_row.setStyleSheet("background:#f0f4ff; border-bottom:1px solid #bfc9da;")
+        _srch_row.setStyleSheet("background:palette(button); border-bottom:1px solid palette(mid);")
         _srch_h = QHBoxLayout(_srch_row)
         _srch_h.setContentsMargins(6, 3, 4, 3)
         _srch_h.setSpacing(3)
@@ -470,8 +474,8 @@ class ClawMailApp(QMainWindow):
         self._search_input.setPlaceholderText("输入关键词搜索邮件…")
         self._search_input.setFixedHeight(22)
         self._search_input.setStyleSheet(
-            "border:1px solid #bfc9da; border-radius:3px; padding:1px 6px;"
-            "background:#fff; font-size:12px;"
+            "border:1px solid palette(mid); border-radius:3px; padding:1px 6px;"
+            "background:palette(base); color:palette(text); font-size:12px;"
         )
         self._search_input.returnPressed.connect(self._on_search_submit)
         _srch_h.addWidget(self._search_input, stretch=1)
@@ -480,8 +484,8 @@ class ClawMailApp(QMainWindow):
         _srch_ok.setFixedSize(22, 22)
         _srch_ok.setToolTip("搜索  (Enter)")
         _srch_ok.setStyleSheet(
-            "border:1px solid #bfc9da; border-radius:3px; background:#dce4f5;"
-            "font-size:10px; color:#3a4a7a;"
+            "border:1px solid palette(mid); border-radius:3px; background:palette(midlight);"
+            "font-size:10px; "
         )
         _srch_ok.clicked.connect(self._on_search_submit)
         _srch_h.addWidget(_srch_ok)
@@ -490,8 +494,8 @@ class ClawMailApp(QMainWindow):
         self._search_clear_btn.setFixedSize(22, 22)
         self._search_clear_btn.setToolTip("返回邮件列表")
         self._search_clear_btn.setStyleSheet(
-            "border:1px solid #e0a0a0; border-radius:3px; background:#fde8e8;"
-            "font-size:10px; color:#a03030;"
+            "border:1px solid palette(mid); border-radius:3px; background:palette(midlight);"
+            "font-size:10px;"
         )
         self._search_clear_btn.setVisible(False)
         self._search_clear_btn.clicked.connect(self._on_search_clear)
@@ -502,7 +506,7 @@ class ClawMailApp(QMainWindow):
         self._filter_toggle_btn.setToolTip("高级筛选")
         self._filter_toggle_btn.setCheckable(True)
         self._filter_toggle_btn.setStyleSheet(
-            "QPushButton{border:1px solid #bfc9da;border-radius:3px;background:#e8eeff;font-size:11px;}"
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;background:palette(midlight);font-size:11px;}"
             "QPushButton:checked{background:#c5d0f5;border-color:#8899dd;}"
         )
         self._filter_toggle_btn.clicked.connect(self._on_filter_toggle)
@@ -512,17 +516,17 @@ class ClawMailApp(QMainWindow):
         # 搜索状态提示行
         self._search_hint = QLabel("⏎ 回车搜索  ·  支持主题、正文、AI 摘要关键词")
         self._search_hint.setStyleSheet(
-            "font-size:10px; color:#9fa8da; padding:1px 8px 2px; background:#f0f4ff;"
+            "font-size:10px;  padding:1px 8px 2px; background:palette(button);"
         )
         _ep_vbox.addWidget(self._search_hint)
 
         # 高级筛选面板（初始折叠）
         _fp_input_style = (
-            "border:1px solid #c8d0e8; border-radius:3px; padding:1px 4px; font-size:11px;"
+            "border:1px solid palette(mid); border-radius:3px; padding:1px 4px; font-size:11px;"
         )
-        _fp_combo_style = "border:1px solid #c8d0e8; border-radius:3px; font-size:11px;"
+        _fp_combo_style = "border:1px solid palette(mid); border-radius:3px; font-size:11px;"
         self._filter_panel = QWidget()
-        self._filter_panel.setStyleSheet("background:#f4f6ff; border-bottom:1px solid #bfc9da;")
+        self._filter_panel.setStyleSheet("background:palette(window); border-bottom:1px solid palette(mid);")
         self._filter_panel.setVisible(False)
         _fp_vbox = QVBoxLayout(self._filter_panel)
         _fp_vbox.setContentsMargins(6, 4, 6, 4)
@@ -588,8 +592,8 @@ class ClawMailApp(QMainWindow):
         _fp_reset = QPushButton("重置")
         _fp_reset.setFixedSize(44, 22)
         _fp_reset.setStyleSheet(
-            "QPushButton{background:#eee;color:#333;border:1px solid #ccc;border-radius:3px;font-size:11px;}"
-            "QPushButton:hover{background:#ddd;}"
+            "QPushButton{background:palette(button);color:palette(button-text);border:1px solid palette(mid);border-radius:3px;font-size:11px;}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
         _fp_reset.clicked.connect(self._on_filter_reset)
         _fp_row2.addWidget(_fp_reset)
@@ -602,7 +606,7 @@ class ClawMailApp(QMainWindow):
         # Right2：邮件内容（QWebEngineView — 完整浏览器渲染）
         self._content_view = EmailWebView()
         self._content_view.setHtml(
-            "<p style='color:#888'>选择一封邮件查看内容</p>", QUrl("file:///")
+            "<p>选择一封邮件查看内容</p>", QUrl("file:///")
         )
         self._content_view.page().todo_link_clicked.connect(self._on_todo_link_clicked)
 
@@ -613,17 +617,17 @@ class ClawMailApp(QMainWindow):
         _cp_vbox.setSpacing(0)
 
         _action_bar = QWidget()
-        _action_bar.setStyleSheet("background:#f0f2f8; border-bottom:1px solid #d0d4e0;")
+        _action_bar.setStyleSheet("background:palette(button); border-bottom:1px solid palette(mid);")
         _action_bar.setFixedHeight(32)
         _ab_hbox = QHBoxLayout(_action_bar)
         _ab_hbox.setContentsMargins(8, 0, 8, 0)
         _ab_hbox.setSpacing(4)
 
         _reply_btn_style = (
-            "QPushButton{border:1px solid #9fa8da;border-radius:3px;background:#e8ecfa;"
-            "color:#3a4a9a;font-size:11px;padding:2px 10px;}"
-            "QPushButton:hover{background:#d0d8f5;}"
-            "QPushButton:disabled{color:#aaa;border-color:#ccc;background:#f5f5f5;}"
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;background:palette(button);"
+            "color:palette(button-text);font-size:11px;padding:2px 10px;}"
+            "QPushButton:hover{background:palette(midlight);}"
+            "QPushButton:disabled{color:palette(mid);border-color:palette(mid);background:palette(window);}"
         )
         self._reply_btn     = QPushButton("↩ 回复")
         self._reply_all_btn = QPushButton("↩ 回复全部")
@@ -704,7 +708,7 @@ class ClawMailApp(QMainWindow):
         # AI 助手面板：带清除按钮的自定义标题行
         _ai_content = self._build_ai_panel()
         _ai_container = QWidget()
-        _ai_container.setStyleSheet("background:#f5f5f5;")
+        _ai_container.setStyleSheet("background:palette(window);")
         _ai_vbox = QVBoxLayout(_ai_container)
         _ai_vbox.setContentsMargins(0, 0, 0, 0)
         _ai_vbox.setSpacing(0)
@@ -713,16 +717,16 @@ class ClawMailApp(QMainWindow):
         _ai_hdr.setSpacing(0)
         _ai_title = QLabel("🤖 AI 助手")
         _ai_title.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-bottom:1px solid #bfc9da; background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-bottom:1px solid palette(mid); background:palette(button);"
         )
         _ai_clear_btn = QPushButton("🗑")
         _ai_clear_btn.setToolTip("清除聊天记录")
         _ai_clear_btn.setFixedSize(28, 28)
         _ai_clear_btn.setStyleSheet(
-            "border:none; border-bottom:1px solid #bfc9da;"
-            "background:#e4eaf6; color:#666; font-size:13px; padding:0;"
-            "QPushButton:hover{background:#d0d9ef;}"
+            "QPushButton{border:none; border-bottom:1px solid palette(mid);"
+            "background:palette(button); font-size:13px; padding:0;}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
         _ai_clear_btn.clicked.connect(self._on_clear_chat)
         self._ai_reconnect_btn = QPushButton("🔄")
@@ -750,12 +754,12 @@ class ClawMailApp(QMainWindow):
         # 顶部工具栏（独占一行，覆盖所有栏目上方）
         _top_btn_style = (
             "QPushButton{font-size:11px;padding:3px 12px;"
-            "border:1px solid #b8b8b8;border-radius:3px;"
-            "background:#f5f5f5;}"
-            "QPushButton:pressed{background:#ddd;}"
+            "border:1px solid palette(mid);border-radius:3px;"
+            "background:palette(window);}"
+            "QPushButton:pressed{background:palette(midlight);}"
         )
         toolbar = QWidget()
-        toolbar.setStyleSheet("background:#cdd5e5; border-bottom:1px solid #b0bbcc;")
+        toolbar.setStyleSheet("background:palette(button); border-bottom:1px solid palette(mid);")
         toolbar.setFixedHeight(32)
         toolbar_hbox = QHBoxLayout(toolbar)
         toolbar_hbox.setContentsMargins(8, 3, 8, 3)
@@ -796,7 +800,7 @@ class ClawMailApp(QMainWindow):
         # 右下角 AI 处理中指示标签（常驻，默认隐藏）
         self._ai_status_label = QLabel()
         self._ai_status_label.setStyleSheet(
-            "color:#5c6bc0;font-size:11px;padding:0 8px;"
+            "font-size:11px;padding:0 8px;"
         )
         self._ai_status_label.setVisible(False)
         self._status_bar.addPermanentWidget(self._ai_status_label)
@@ -819,8 +823,8 @@ class ClawMailApp(QMainWindow):
         layout.setSpacing(0)
         header = QLabel(title)
         header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-bottom:1px solid #bfc9da; background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-bottom:1px solid palette(mid); background:palette(button);"
         )
         layout.addWidget(header)
         layout.addWidget(widget)
@@ -904,7 +908,7 @@ class ClawMailApp(QMainWindow):
         if self._search_hint:
             self._search_hint.setText("⏎ 回车搜索  ·  支持主题、正文、AI 摘要关键词")
             self._search_hint.setStyleSheet(
-                "font-size:10px; color:#9fa8da; padding:1px 8px 2px; background:#f0f4ff;"
+                "font-size:10px;  padding:1px 8px 2px; background:palette(button);"
             )
         # 取消分类栏选中
         self._category_list.blockSignals(True)
@@ -1000,7 +1004,7 @@ class ClawMailApp(QMainWindow):
         if self._search_hint:
             self._search_hint.setText(f"← 点击右侧按钮返回邮件列表  ·  共 {len(results)} 封")
             self._search_hint.setStyleSheet(
-                "font-size:10px; color:#e57373; padding:1px 8px 2px; background:#fff5f5;"
+                "font-size:10px; padding:1px 8px 2px; background:palette(button);"
             )
         self._email_list.clear()
         for email in results:
@@ -1018,7 +1022,7 @@ class ClawMailApp(QMainWindow):
         if self._search_hint:
             self._search_hint.setText("⏎ 回车搜索  ·  支持主题、正文、AI 摘要关键词")
             self._search_hint.setStyleSheet(
-                "font-size:10px; color:#9fa8da; padding:1px 8px 2px; background:#f0f4ff;"
+                "font-size:10px;  padding:1px 8px 2px; background:palette(button);"
             )
         self._on_filter_reset()
         if hasattr(self, "_filter_panel") and self._filter_panel:
@@ -1135,16 +1139,16 @@ class ClawMailApp(QMainWindow):
         _add_todo_btn = (
             f"<a href='clawmail-todo://add-email?{_add_email_params}' "
             f"style='display:inline-block;margin-top:6px;font-size:11px;"
-            f"color:#5c6bc0;text-decoration:none;"
-            f"padding:2px 9px;border:1px solid #9fa8da;border-radius:3px;"
-            f"background:#f0f4ff'>📝 加入待办</a>"
+            f"text-decoration:none;"
+            f"padding:2px 9px;border:1px solid #888;border-radius:3px;"
+            f"'>📝 加入待办</a>"
         )
         header_html = (
             f"<div style='font-family:sans-serif;font-size:13px;"
-            f"padding:10px 14px;border-bottom:1px solid #ddd;background:#f9f9f9'>"
+            f"padding:10px 14px;border-bottom:1px solid #888;'>"
             f"<b>{_esc(email.subject or '')}</b><br>"
-            f"<span style='color:#555'>发件人：{_esc(from_str)}</span><br>"
-            f"<span style='color:#555'>时间：{_esc(date_str)}</span><br>"
+            f"发件人：{_esc(from_str)}<br>"
+            f"时间：{_esc(date_str)}<br>"
             f"{_add_todo_btn}"
             f"</div>"
         )
@@ -1195,7 +1199,7 @@ class ClawMailApp(QMainWindow):
                 + f"<pre style='padding:14px;white-space:pre-wrap'>{_esc(email.body_text)}</pre>"
             )
         else:
-            html = header_html + ai_panel_html + "<p style='padding:14px;color:#888'>[无邮件内容]</p>"
+            html = header_html + ai_panel_html + "<p style='padding:14px;'>[无邮件内容]</p>"
 
         # 附件列表
         attachments = self._db.get_attachments_by_email(email_id) if self._db else []
@@ -1208,13 +1212,13 @@ class ClawMailApp(QMainWindow):
                 for att in attachments
             )
             html += (
-                f"<div style='padding:10px 14px;background:#f5f5f5;"
-                f"border-top:1px solid #ddd;font-size:12px'>"
+                f"<div style='padding:10px 14px;background:palette(window);"
+                f"border-top:1px solid #888;font-size:12px'>"
                 f"<b>附件：</b>{items}</div>"
             )
 
         self._content_view.setHtml(
-            "<p style='color:#888;padding:14px'>加载中…</p>", QUrl("file:///")
+"<p style='padding:14px'>加载中…</p>", QUrl("file:///")
         )
         asyncio.ensure_future(self._display_email_async(html))
 
@@ -1358,8 +1362,8 @@ class ClawMailApp(QMainWindow):
         # ---- 数据管理 ----
         section_label = QLabel("数据管理")
         section_label.setStyleSheet(
-            "color:#555; font-weight:bold; font-size:11px; "
-            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+            "font-weight:bold; font-size:11px; "
+            "padding-top:10px; border-top:1px solid palette(mid); margin-top:6px;"
         )
         form.addRow(section_label)
 
@@ -1374,7 +1378,7 @@ class ClawMailApp(QMainWindow):
             return f"{b / (1024 * 1024):.1f} MB" if b >= 1024 * 1024 else f"{b // 1024} KB"
 
         size_label = QLabel(_fmt_mb(_calc_size(att_dir)))
-        size_label.setStyleSheet("color:#888; font-size:11px;")
+        size_label.setStyleSheet("font-size:11px;")
         form.addRow("缓存大小：", size_label)
 
         clear_btn = QPushButton("一键清除本地缓存文件")
@@ -1401,7 +1405,7 @@ class ClawMailApp(QMainWindow):
         # 邮件数量标签
         email_count = self._db.count_emails(self._current_account_id) if self._db else 0
         email_count_label = QLabel(f"{email_count} 封")
-        email_count_label.setStyleSheet("color:#888; font-size:11px;")
+        email_count_label.setStyleSheet("font-size:11px;")
         form.addRow("本地邮件：", email_count_label)
 
         clear_emails_btn = QPushButton("一键清除本地邮件")
@@ -1424,7 +1428,7 @@ class ClawMailApp(QMainWindow):
             # 清空 UI 列表与内容视图
             self._email_list.clear()
             self._content_view.setHtml(
-                "<p style='color:#888'>选择一封邮件查看内容</p>", QUrl("file:///")
+                "<p>选择一封邮件查看内容</p>", QUrl("file:///")
             )
             email_count_label.setText("0 封")
             QMessageBox.information(dlg, "清除完成", f"已删除 {deleted} 封本地邮件。\n下次同步后将重新从服务器拉取。")
@@ -1435,7 +1439,7 @@ class ClawMailApp(QMainWindow):
         # 待办任务数量标签 + 清除按钮
         task_count = len(self._db.get_tasks_for_todo()) if self._db else 0
         task_count_label = QLabel(f"{task_count} 条")
-        task_count_label.setStyleSheet("color:#888; font-size:11px;")
+        task_count_label.setStyleSheet("font-size:11px;")
         form.addRow("待办任务：", task_count_label)
 
         clear_tasks_btn = QPushButton("一键清除待办列表")
@@ -1909,7 +1913,7 @@ class ClawMailApp(QMainWindow):
         to_str = _html_mod.escape(self._current_account.email_address if self._current_account else "")
 
         header_html = (
-            "<div style='font-family:sans-serif;font-size:12px;color:#666;"
+            "<div style='font-family:sans-serif;font-size:12px;"
             "border-top:1px solid #ccc;padding-top:6px;margin-top:16px'>"
             f"---------- {label} ----------<br>"
             f"发件人: {from_str_esc}<br>"
@@ -2003,8 +2007,8 @@ class ClawMailApp(QMainWindow):
                 })
                 add_link = (
                     f"<a href='clawmail-todo://add?{params}' "
-                    f"style='font-size:11px;color:#5c6bc0;text-decoration:none;"
-                    f"padding:1px 6px;border:1px solid #9fa8da;border-radius:3px;"
+                    f"style='font-size:11px;text-decoration:none;"
+                    f"padding:1px 6px;border:1px solid #888;border-radius:3px;"
                     f"white-space:nowrap'>＋ 加入待办</a>"
                 )
                 rows += (
@@ -2029,7 +2033,7 @@ class ClawMailApp(QMainWindow):
             return ""
         body = "".join(parts)
         return (
-            "<div style='padding:10px 14px;background:#f0f4ff;"
+            "<div style='padding:10px 14px;background:palette(button);"
             "border-bottom:1px solid #c5cae9;font-family:sans-serif'>"
             "<div style='font-size:11px;color:#7986cb;font-weight:bold;"
             "margin-bottom:6px'>🤖 AI 分析</div>"
@@ -2374,7 +2378,7 @@ class ClawMailApp(QMainWindow):
     def _build_todo_panel(self) -> QWidget:
         """构建 ToDo 面板：分组任务列表 + 快速添加输入框。"""
         container = QWidget()
-        container.setStyleSheet("background:#f9f9f9;")
+        container.setStyleSheet("background:palette(window);")
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
@@ -2384,16 +2388,16 @@ class ClawMailApp(QMainWindow):
         _todo_hdr_row.setSpacing(0)
         _todo_hdr_label = QLabel("📝 待办事项")
         _todo_hdr_label.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; color:#2c3455;"
-            "border-bottom:1px solid #bfc9da; background:#e4eaf6;"
+            "padding:5px 10px; font-weight:bold; font-size:11px; "
+            "border-bottom:1px solid palette(mid); background:palette(button);"
         )
         _todo_refresh_btn = QPushButton("↻")
         _todo_refresh_btn.setToolTip("刷新待办列表")
         _todo_refresh_btn.setFixedSize(28, 28)
         _todo_refresh_btn.setStyleSheet(
-            "border:none; border-bottom:1px solid #bfc9da;"
-            "background:#e4eaf6; color:#444; font-size:15px; padding:0;"
-            "QPushButton:hover{background:#d0d9ef;}"
+            "QPushButton{border:none; border-bottom:1px solid palette(mid);"
+            "background:palette(button); font-size:15px; padding:0;}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
         _todo_refresh_btn.clicked.connect(self._refresh_todo_list)
         _todo_hdr_row.addWidget(_todo_hdr_label, stretch=1)
@@ -2402,10 +2406,10 @@ class ClawMailApp(QMainWindow):
         _todo_hdr_widget.setLayout(_todo_hdr_row)
         vbox.addWidget(_todo_hdr_widget)
 
-        _input_style = "border:1px solid #ddd; border-radius:3px; padding:2px 6px;"
+        _input_style = "border:1px solid palette(mid); border-radius:3px; padding:2px 6px;"
         _btn_style = (
-            "QPushButton{border:1px solid #ddd;border-radius:3px;background:#fff;}"
-            "QPushButton:hover{background:#e8f0fe;}"
+            "QPushButton{border:1px solid palette(mid);border-radius:3px;background:palette(base);}"
+            "QPushButton:hover{background:palette(midlight);}"
         )
 
         # ── 搜索 + 筛选 + 排序行 ──
@@ -2428,7 +2432,7 @@ class ClawMailApp(QMainWindow):
         vbox.addLayout(toolbar)
 
         self._todo_list = QListWidget()
-        self._todo_list.setStyleSheet("border:none; background:#f9f9f9;")
+        self._todo_list.setStyleSheet("border:none; background:palette(window);")
         self._todo_list.itemChanged.connect(self._on_todo_item_clicked)
         self._todo_list.itemDoubleClicked.connect(self._on_todo_item_double_clicked)
         self._todo_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2780,7 +2784,7 @@ class ClawMailApp(QMainWindow):
         form.setSpacing(8)
         form.setContentsMargins(12, 12, 12, 8)
 
-        _input_style = "border:1px solid #ddd; border-radius:3px; padding:2px 6px;"
+        _input_style = "border:1px solid palette(mid); border-radius:3px; padding:2px 6px;"
 
         # 标题
         title_edit = QLineEdit(task.title or "")
@@ -2874,14 +2878,14 @@ class ClawMailApp(QMainWindow):
         self._chat_history = QTextBrowser()
         self._chat_history.setOpenExternalLinks(False)
         self._chat_history.setStyleSheet(
-            "background:#ffffff; border:1px solid #ddd; border-radius:4px;"
+            "background:palette(base); border:1px solid palette(mid); border-radius:4px;"
         )
         layout.addWidget(self._chat_history, stretch=1)
 
         # 打字动画指示器（AI 回复时显示）
         self._typing_label = QLabel()
         self._typing_label.setStyleSheet(
-            "color:#7986cb; font-size:11px; padding:1px 4px; font-style:italic;"
+            "font-size:11px; padding:1px 4px; font-style:italic;"
         )
         self._typing_label.setVisible(False)
         layout.addWidget(self._typing_label)
