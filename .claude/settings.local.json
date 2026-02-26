@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:ultramail.ai)",
-      "WebFetch(domain:www.baytechconsulting.com)"
+      "WebFetch(domain:www.baytechconsulting.com)",
+      "Bash(find \"c:\\\\Users\\\\a\\\\Desktop\\\\projectA\\\\clawmail\" -type f -name \"*.py\" -exec grep -l \"executor\\\\|ThreadPoolExecutor\\\\|thread\" {} ;)"
     ]
   }
 }

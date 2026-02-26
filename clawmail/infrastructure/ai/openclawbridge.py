@@ -32,7 +32,7 @@ class OpenClawBridge:
     ) -> str:
         """
         邮件 AI 处理，对应 ClawChat.mailChat 模式。
-        mail_id 格式：mailAgent_{email_id[:8]}
+        mail_id 固定使用 mailAgent001。
         """
         messages = [{"role": "user", "content": f"(ClawMail){mail_input}"}]
         full_response = ""

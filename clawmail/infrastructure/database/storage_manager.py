@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS email_ai_metadata (
     action_items TEXT,
     reply_stances TEXT,
     urgency TEXT CHECK(urgency IN ('high','medium','low') OR urgency IS NULL),
+    feedback_rating INTEGER CHECK(feedback_rating BETWEEN 1 AND 5 OR feedback_rating IS NULL),
     ai_status TEXT DEFAULT 'unprocessed'
         CHECK(ai_status IN ('unprocessed', 'processing', 'processed', 'failed', 'skipped')),
     processing_progress INTEGER DEFAULT 0,
@@ -336,6 +337,8 @@ class ClawDB:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN reply_stances TEXT")
             if "urgency" not in ai_cols:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN urgency TEXT")
+            if "feedback_rating" not in ai_cols:
+                conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN feedback_rating INTEGER")
             conn.commit()
 
     @contextmanager

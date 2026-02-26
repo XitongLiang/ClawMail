@@ -9,16 +9,22 @@ import html as _html_mod
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QDate, QSize, QUrl, pyqtSignal, pyqtSlot
+_CST = timedelta(hours=8)
+
+def _to_cst(dt: datetime) -> datetime:
+    """UTC datetime → 北京时间（UTC+8）。"""
+    return dt + _CST
+
+from PyQt6.QtCore import QEvent, Qt, QDate, QSize, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QDesktopServices, QFont
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
     QSplitter, QStatusBar, QStyle, QStyledItemDelegate, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -263,6 +269,67 @@ class EmailWebView(QWebEngineView):
         s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
 
 
+class _FbStarBar(QWidget):
+    """1-5 星评分条：hover 时左侧星星联动高亮，点击后锁定。"""
+
+    rating_selected = pyqtSignal(int)   # 发射 1-5
+
+    _CLR_OFF  = "#d0d0d0"
+    _CLR_HOVER  = "#ffc107"
+    _CLR_ON   = "#f5a623"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rating = 0
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self._btns: list = []
+        for i in range(1, 6):
+            btn = QPushButton("★")
+            btn.setFixedSize(30, 30)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.installEventFilter(self)
+            btn.clicked.connect(lambda _, n=i: self._on_click(n))
+            layout.addWidget(btn)
+            self._btns.append(btn)
+        layout.addStretch()
+        self._render(0, 0)
+
+    def eventFilter(self, obj, event):
+        if obj in self._btns:
+            idx = self._btns.index(obj) + 1
+            if event.type() == QEvent.Type.Enter:
+                self._render(self._rating, idx)
+            elif event.type() == QEvent.Type.Leave:
+                self._render(self._rating, 0)
+        return super().eventFilter(obj, event)
+
+    def _on_click(self, n: int):
+        self._rating = n
+        self._render(n, 0)
+        self.rating_selected.emit(n)
+
+    def _render(self, filled: int, hover: int):
+        active = max(filled, hover)
+        for i, btn in enumerate(self._btns, 1):
+            if i <= active:
+                clr = self._CLR_HOVER if (hover > 0 and i <= hover) else self._CLR_ON
+            else:
+                clr = self._CLR_OFF
+            btn.setStyleSheet(
+                f"QPushButton{{border:none;background:transparent;"
+                f"font-size:22px;color:{clr};padding:0;}}"
+            )
+
+    def get_rating(self) -> int:
+        return self._rating
+
+    def reset(self):
+        self._rating = 0
+        self._render(0, 0)
+
+
 class ClawMailApp(QMainWindow):
     def __init__(self, db=None, cred_manager=None):
         super().__init__()
@@ -294,7 +361,13 @@ class ClawMailApp(QMainWindow):
         self._typing_label = None
         self._typing_timer = None
         self._typing_frame = 0
+        self._pending_ai_task: Optional[asyncio.Task] = None
+        self._ai_request_cancelled: bool = False
+        self._ai_chat_mode: str = "user_chat"
+        self._feedback_email_id: Optional[str] = None
+        self._feedback_meta = None
         self._init_ui()
+        self._ai_chat_mode = self._load_config().get("ai_chat_mode", "user_chat")
 
     # ----------------------------------------------------------------
     # UI 初始化
@@ -567,6 +640,62 @@ class ClawMailApp(QMainWindow):
 
         _cp_vbox.addWidget(_action_bar)
         _cp_vbox.addWidget(self._content_view, stretch=1)
+
+        # ── AI 摘要反馈面板（星评分） ──
+        self._feedback_widget = QFrame()
+        self._feedback_widget.setStyleSheet(
+            "QFrame{background:#f5f7ff;border-top:1px solid #c5cae9;}"
+        )
+        self._feedback_widget.setVisible(False)
+        _fb_vbox = QVBoxLayout(self._feedback_widget)
+        _fb_vbox.setContentsMargins(14, 8, 14, 10)
+        _fb_vbox.setSpacing(6)
+
+        _fb_title = QLabel("对 AI 摘要评分：")
+        _fb_title.setStyleSheet("font-size:12px;color:#3a4a9a;font-weight:bold;")
+        _fb_vbox.addWidget(_fb_title)
+
+        _fb_star_row = QHBoxLayout()
+        _fb_star_row.setSpacing(4)
+        self._fb_star_bar = _FbStarBar()
+        _fb_star_row.addWidget(self._fb_star_bar)
+        _fb_star_row.addStretch()
+        _fb_vbox.addLayout(_fb_star_row)
+
+        self._fb_comment_edit = QTextEdit()
+        self._fb_comment_edit.setPlaceholderText("填写反馈意见（可选）…")
+        self._fb_comment_edit.setFixedHeight(58)
+        self._fb_comment_edit.setStyleSheet(
+            "font-size:12px;border:1px solid #c5cae9;border-radius:3px;"
+        )
+        self._fb_comment_edit.setVisible(False)
+        _fb_vbox.addWidget(self._fb_comment_edit)
+
+        _fb_submit_btn = QPushButton("提交")
+        _fb_submit_btn.setFixedHeight(26)
+        _fb_submit_btn.setEnabled(False)
+        _fb_submit_btn.setStyleSheet(
+            "QPushButton{border:1px solid #9fa8da;border-radius:3px;"
+            "background:#e8ecfa;color:#3a4a9a;font-size:11px;padding:2px 14px;}"
+            "QPushButton:hover{background:#d0d8f5;}"
+            "QPushButton:disabled{color:#aaa;border-color:#ccc;background:#f5f5f5;}"
+        )
+        _fb_btn_row = QHBoxLayout()
+        _fb_btn_row.addStretch()
+        _fb_btn_row.addWidget(_fb_submit_btn)
+        _fb_vbox.addLayout(_fb_btn_row)
+
+        _cp_vbox.addWidget(self._feedback_widget)
+
+        # 点星 → 显示评论框，激活提交按钮
+        self._fb_star_bar.rating_selected.connect(
+            lambda _: (
+                self._fb_comment_edit.setVisible(True),
+                _fb_submit_btn.setEnabled(True),
+            )
+        )
+        _fb_submit_btn.clicked.connect(self._on_feedback_submit)
+
         splitter.addWidget(_content_panel)
 
         # Right1：ToDo 面板（上）+ AI 助手聊天面板（下）
@@ -596,7 +725,17 @@ class ClawMailApp(QMainWindow):
             "QPushButton:hover{background:#d0d9ef;}"
         )
         _ai_clear_btn.clicked.connect(self._on_clear_chat)
+        self._ai_reconnect_btn = QPushButton("🔄")
+        self._ai_reconnect_btn.setToolTip("重新连接 AI")
+        self._ai_reconnect_btn.setFixedSize(28, 28)
+        self._ai_reconnect_btn.setStyleSheet(
+            "border:none; border-bottom:1px solid #bfc9da;"
+            "background:#e4eaf6; color:#666; font-size:13px; padding:0;"
+            "QPushButton:hover{background:#d0d9ef;}"
+        )
+        self._ai_reconnect_btn.clicked.connect(self._on_ai_reconnect)
         _ai_hdr.addWidget(_ai_title, stretch=1)
+        _ai_hdr.addWidget(self._ai_reconnect_btn)
         _ai_hdr.addWidget(_ai_clear_btn)
         _ai_hdr_widget = QWidget()
         _ai_hdr_widget.setLayout(_ai_hdr)
@@ -984,7 +1123,7 @@ class ClawMailApp(QMainWindow):
             self._email_list.viewport().update()
         from_info = email.from_address or {}
         from_str = f"{from_info.get('name', '')} <{from_info.get('email', '')}>"
-        date_str = email.received_at.strftime("%Y-%m-%d %H:%M") if email.received_at else ""
+        date_str = _to_cst(email.received_at).strftime("%Y-%m-%d %H:%M") if email.received_at else ""
         def _esc(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -1015,17 +1154,38 @@ class ClawMailApp(QMainWindow):
             meta = self._db.get_email_ai_metadata(email_id)
             if meta and meta.ai_status == "processed":
                 ai_panel_html = self._build_ai_summary_html(meta)
-            elif meta and meta.ai_status == "failed":
-                err_detail = ""
-                if meta.processing_error:
-                    err_detail = (
-                        f" <span style='color:#aaa'>({_html_mod.escape(meta.processing_error[:80])})</span>"
+                # 只对未打过分的邮件显示反馈面板
+                with self._db.get_conn() as _fc:
+                    _fr = _fc.execute(
+                        "SELECT feedback_rating FROM email_ai_metadata WHERE email_id=?",
+                        (email_id,),
+                    ).fetchone()
+                _already_rated = _fr and _fr[0] is not None
+                if _already_rated:
+                    self._feedback_widget.setVisible(False)
+                else:
+                    self._feedback_email_id = email_id
+                    self._feedback_meta = meta
+                    self._fb_star_bar.reset()
+                    self._fb_comment_edit.clear()
+                    self._fb_comment_edit.setVisible(False)
+                    self._feedback_widget.setEnabled(True)
+                    self._feedback_widget.setVisible(True)
+            else:
+                self._feedback_widget.setVisible(False)
+                if meta and meta.ai_status == "failed":
+                    err_detail = ""
+                    if meta.processing_error:
+                        err_detail = (
+                            f" <span style='color:#aaa'>({_html_mod.escape(meta.processing_error[:80])})</span>"
+                        )
+                    ai_panel_html = (
+                        "<div style='padding:6px 14px;background:#fff8e1;"
+                        "border-bottom:1px solid #ffe082;font-size:12px;color:#795548'>"
+                        f"⚠️ AI 分析失败，将在下次启动时重试{err_detail}</div>"
                     )
-                ai_panel_html = (
-                    "<div style='padding:6px 14px;background:#fff8e1;"
-                    "border-bottom:1px solid #ffe082;font-size:12px;color:#795548'>"
-                    f"⚠️ AI 分析失败，将在下次启动时重试{err_detail}</div>"
-                )
+        else:
+            self._feedback_widget.setVisible(False)
 
         if email.body_html:
             html = header_html + ai_panel_html + email.body_html
@@ -1074,6 +1234,86 @@ class ClawMailApp(QMainWindow):
             accs = self._db.get_all_accounts() if self._db else []
             if accs:
                 asyncio.ensure_future(self._sync_service.run_once(accs[0]))
+
+    def _on_feedback_submit(self) -> None:
+        """收集星评分反馈，持久化到 DB，并发送给 OpenClaw。"""
+        rating = self._fb_star_bar.get_rating()
+        if rating == 0 or not self._feedback_email_id:
+            return
+
+        email   = self._db.get_email(self._feedback_email_id) if self._db else None
+        meta    = self._feedback_meta
+        comment = self._fb_comment_edit.toPlainText().strip()
+
+        subject   = (email.subject or "（无主题）") if email else "（未知）"
+        body_text = ((email.body_text or "")[:500]) if email else ""
+        summary   = (meta.summary_brief or meta.summary_one_line or "") if meta else ""
+
+        lines = [
+            "【AI摘要用户评分反馈】",
+            f"邮件主题：{subject}",
+            f"邮件内容（前500字）：{body_text}",
+            "",
+            f"AI生成摘要：{summary}",
+            "",
+            f"用户评分：{rating}/5 星",
+        ]
+        if comment:
+            lines.append(f"反馈意见：{comment}")
+        prompt = "\n".join(lines)
+
+        # 持久化评分到 DB
+        if self._db:
+            try:
+                with self._db.get_conn() as conn:
+                    conn.execute(
+                        "UPDATE email_ai_metadata SET feedback_rating=? WHERE email_id=?",
+                        (rating, self._feedback_email_id),
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+
+        # 隐藏面板（已评分）
+        self._feedback_widget.setVisible(False)
+
+        # 在聊天框显示用户侧摘要（简洁格式）
+        star_str = "★" * rating + "☆" * (5 - rating)
+        chat_user_text = (
+            f"📧 邮件：{subject}\n"
+            f"摘要评分：{star_str} ({rating}/5)\n"
+            f"反馈意见：{comment or '（无）'}"
+        )
+        self._append_user_message(chat_user_text)
+
+        if not self._ai_bridge:
+            self._append_ai_message("（AI 未连接，评分已保存）")
+            self._status_bar.showMessage("✅ 评分已保存", 3000)
+            return
+
+        self._show_typing()
+        self._input_line.setEnabled(False)
+        self._send_btn.setEnabled(False)
+        self._status_bar.showMessage("正在提交反馈…", 2000)
+
+        async def _send():
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._ai_bridge.user_chat(prompt, "feedbackAgent001"),
+                )
+                self._append_ai_message(response)
+                self._status_bar.showMessage("✅ 反馈已提交，感谢！", 3000)
+            except Exception as e:
+                self._append_ai_message(f"（反馈发送失败：{e}）")
+                self._status_bar.showMessage("✅ 评分已保存（发送失败）", 3000)
+            finally:
+                self._hide_typing()
+                self._input_line.setEnabled(True)
+                self._send_btn.setEnabled(True)
+
+        asyncio.ensure_future(_send())
 
     def _on_settings(self):
         """打开设置对话框。"""
@@ -1221,6 +1461,66 @@ class ClawMailApp(QMainWindow):
         clear_tasks_btn.clicked.connect(_on_clear_tasks)
         form.addRow(clear_tasks_btn)
 
+        # ---- AI 助手 ----
+        ai_chat_section = QLabel("AI 助手")
+        ai_chat_section.setStyleSheet(
+            "color:#555; font-weight:bold; font-size:11px; "
+            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+        )
+        form.addRow(ai_chat_section)
+
+        mode_combo = QComboBox()
+        mode_combo.addItem("用户对话 (user_chat)", "user_chat")
+        mode_combo.addItem("邮件助手 (mail_chat)", "mail_chat")
+        mode_combo.setCurrentIndex(0 if self._ai_chat_mode == "user_chat" else 1)
+        form.addRow("聊天模式：", mode_combo)
+
+        # ---- AI 分析 ----
+        ai_section_label = QLabel("AI 分析")
+        ai_section_label.setStyleSheet(
+            "color:#555; font-weight:bold; font-size:11px; "
+            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+        )
+        form.addRow(ai_section_label)
+
+        _accs = self._db.get_all_accounts() if self._db else []
+        if _accs:
+            with self._db.get_conn() as _c:
+                _inbox_count = _c.execute(
+                    "SELECT COUNT(*) FROM emails WHERE account_id=? AND folder='INBOX'",
+                    (_accs[0].id,),
+                ).fetchone()[0]
+        else:
+            _inbox_count = 0
+
+        ai_inbox_btn = QPushButton(f"🤖 一键 AI 分析收件箱（{_inbox_count} 封）")
+
+        def _on_ai_all_inbox():
+            if not self._ai_bridge:
+                QMessageBox.information(
+                    dlg, "AI 未连接",
+                    "AI 助手当前未连接，请先检查 OpenClaw 服务。",
+                )
+                return
+            if not _accs or not self._ai_service:
+                return
+            with self._db.get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM emails WHERE account_id=? AND folder='INBOX'"
+                    " ORDER BY received_at DESC LIMIT 500",
+                    (_accs[0].id,),
+                ).fetchall()
+            ids = [r[0] for r in rows]
+            for eid in ids:
+                self._ai_service.enqueue(eid)
+            dlg.accept()
+            self._status_bar.showMessage(
+                f"已将 {len(ids)} 封收件箱邮件加入 AI 分析队列…", 5000
+            )
+
+        ai_inbox_btn.clicked.connect(_on_ai_all_inbox)
+        form.addRow(ai_inbox_btn)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1231,8 +1531,17 @@ class ClawMailApp(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
+        # 保存聊天模式
+        new_mode = mode_combo.currentData()
+        mode_changed = new_mode != self._ai_chat_mode
+        if mode_changed:
+            self._ai_chat_mode = new_mode
+            self._save_config({"ai_chat_mode": new_mode})
+
         new_token = token_edit.text().strip()
         if not new_token:
+            if mode_changed:
+                self._status_bar.showMessage("✅ 设置已保存", 3000)
             return
 
         # 更新 bridge
@@ -1573,7 +1882,7 @@ class ClawMailApp(QMainWindow):
         sender_name  = from_info.get("name", "")
         sender_email = from_info.get("email", "")
         from_str = f"{sender_name} <{sender_email}>".strip() if sender_name else sender_email
-        date_str = email.received_at.strftime("%Y-%m-%d %H:%M") if email.received_at else ""
+        date_str = _to_cst(email.received_at).strftime("%Y-%m-%d %H:%M") if email.received_at else ""
         label = "转发邮件" if is_forward else "原始邮件"
         orig = (email.body_text or "").strip()
         return (
@@ -1595,7 +1904,7 @@ class ClawMailApp(QMainWindow):
         from_str_esc = _html_mod.escape(
             f"{sender_name} <{sender_email}>".strip() if sender_name else sender_email
         )
-        date_str = email.received_at.strftime("%Y-%m-%d %H:%M") if email.received_at else ""
+        date_str = _to_cst(email.received_at).strftime("%Y-%m-%d %H:%M") if email.received_at else ""
         label = "转发邮件" if is_forward else "原始邮件"
         to_str = _html_mod.escape(self._current_account.email_address if self._current_account else "")
 
@@ -1924,6 +2233,16 @@ class ClawMailApp(QMainWindow):
         existing.update(data)
         path.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
 
+    def _load_config(self) -> dict:
+        path = self._config_path()
+        if path and path.exists():
+            try:
+                return json.loads(path.read_text())
+            except Exception:
+                pass
+        return {}
+
+
     # ----------------------------------------------------------------
     # 邮件列表刷新
     # ----------------------------------------------------------------
@@ -2007,7 +2326,7 @@ class ClawMailApp(QMainWindow):
 
         subject = email.subject or "(无主题)"
         time_str = (
-            email.received_at.strftime("%Y-%m-%d %H:%M")
+            _to_cst(email.received_at).strftime("%Y-%m-%d %H:%M")
             if email.received_at else ""
         )
         is_unread = (email.read_status == "unread")
@@ -2423,7 +2742,7 @@ class ClawMailApp(QMainWindow):
             if email:
                 from_info = email.from_address or {}
                 sender = f"{from_info.get('name', '')} <{from_info.get('email', '')}>".strip(" <>")
-                date_str = email.received_at.strftime("%Y/%m/%d %H:%M") if email.received_at else "未知"
+                date_str = _to_cst(email.received_at).strftime("%Y/%m/%d %H:%M") if email.received_at else "未知"
                 ai_meta = self._db.get_email_ai_metadata(task.source_email_id)
                 summary = (ai_meta.summary_one_line or ai_meta.summary_brief or "") if ai_meta else ""
                 if not summary:
@@ -2582,6 +2901,20 @@ class ClawMailApp(QMainWindow):
 
         return container
 
+    def _on_ai_reconnect(self) -> None:
+        """取消当前挂起的 AI 请求，立即恢复输入状态。"""
+        task = self._pending_ai_task
+        if task and not task.done():
+            self._ai_request_cancelled = True
+            task.cancel()
+            self._pending_ai_task = None
+            self._hide_typing()
+            self._append_ai_message("⏹ Interrupted.")
+            self._send_btn.setEnabled(True)
+            self._input_line.setEnabled(True)
+            self._input_line.setFocus()
+            self._status_bar.showMessage("⏹ 已中断 AI 响应", 2000)
+
     def _on_clear_chat(self) -> None:
         """清除聊天历史（界面 + AI 桥接侧记忆）。"""
         self._chat_history.clear()
@@ -2609,22 +2942,33 @@ class ClawMailApp(QMainWindow):
         self._send_btn.setEnabled(False)
         self._show_typing()
 
-        asyncio.ensure_future(self._send_message_async(text))
+        self._pending_ai_task = asyncio.ensure_future(self._send_message_async(text))
 
     async def _send_message_async(self, text: str) -> None:
+        self._ai_request_cancelled = False
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(
-                None, self._ai_bridge.user_chat, text
-            )
-            self._append_ai_message(response)
+            if self._ai_chat_mode == "mail_chat":
+                response = await loop.run_in_executor(
+                    None, self._ai_bridge.process_email, text
+                )
+            else:
+                response = await loop.run_in_executor(
+                    None, self._ai_bridge.user_chat, text
+                )
+            if not self._ai_request_cancelled:
+                self._append_ai_message(response)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            self._append_ai_message(f"[请求失败：{e}]")
+            if not self._ai_request_cancelled:
+                self._append_ai_message(f"[请求失败：{e}]")
         finally:
-            self._hide_typing()
-            self._send_btn.setEnabled(True)
-            self._input_line.setEnabled(True)
-            self._input_line.setFocus()
+            if not self._ai_request_cancelled:
+                self._hide_typing()
+                self._send_btn.setEnabled(True)
+                self._input_line.setEnabled(True)
+                self._input_line.setFocus()
 
     _TYPING_FRAMES = [
         "🤖  Claw 正在思考 ·",
