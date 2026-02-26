@@ -783,6 +783,31 @@ class ComposeDialog(QDialog):
             if self._draft_id and self._db:
                 self._db.delete_email(self._draft_id)
                 self._draft_id = None
+            # 更新原邮件：reply_status + 移除 pending_reply 分类
+            if self._source_email and self._db:
+                src_id = self._source_email.id
+                with self._db.get_conn() as conn:
+                    conn.execute(
+                        "UPDATE emails SET reply_status='replied', updated_at=? WHERE id=?",
+                        (datetime.utcnow().isoformat(), src_id),
+                    )
+                    row = conn.execute(
+                        "SELECT categories FROM email_ai_metadata WHERE email_id=?",
+                        (src_id,),
+                    ).fetchone()
+                    if row and row[0]:
+                        import json as _json
+                        try:
+                            cats = _json.loads(row[0])
+                            if "pending_reply" in cats:
+                                cats.remove("pending_reply")
+                                conn.execute(
+                                    "UPDATE email_ai_metadata SET categories=? WHERE email_id=?",
+                                    (_json.dumps(cats, ensure_ascii=False), src_id),
+                                )
+                        except Exception:
+                            pass
+                    conn.commit()
             parent = self.parent()
             if parent and hasattr(parent, "_status_bar"):
                 parent._status_bar.showMessage("✅ 发送成功，正在同步已发送…", 4000)

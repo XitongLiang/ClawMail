@@ -707,13 +707,29 @@ async def send_reply(req: SendReplyRequest):
     except SMTPSendError as e:
         raise HTTPException(status_code=502, detail=f"SMTP send failed: {e}")
 
-    # 更新原邮件 reply_status
+    # 更新原邮件 reply_status + 移除 pending_reply 分类
     try:
         with _db.get_conn() as conn:
             conn.execute(
                 "UPDATE emails SET reply_status='replied', updated_at=? WHERE id=?",
                 (datetime.utcnow().isoformat(), req.email_id),
             )
+            row = conn.execute(
+                "SELECT categories FROM email_ai_metadata WHERE email_id=?",
+                (req.email_id,),
+            ).fetchone()
+            if row and row[0]:
+                import json as _json
+                try:
+                    cats = _json.loads(row[0])
+                    if "pending_reply" in cats:
+                        cats.remove("pending_reply")
+                        conn.execute(
+                            "UPDATE email_ai_metadata SET categories=? WHERE email_id=?",
+                            (_json.dumps(cats, ensure_ascii=False), req.email_id),
+                        )
+                except Exception:
+                    pass
             conn.commit()
     except Exception:
         pass  # 状态更新失败不影响发送结果

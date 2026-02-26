@@ -1359,6 +1359,70 @@ class ClawMailApp(QMainWindow):
         token_row.addWidget(show_btn)
         form.addRow("OpenClaw Token：", token_row)
 
+        # ---- 账户管理 ----
+        acct_section = QLabel("账户管理")
+        acct_section.setStyleSheet(
+            "color:#555; font-weight:bold; font-size:11px; "
+            "padding-top:10px; border-top:1px solid #ddd; margin-top:6px;"
+        )
+        form.addRow(acct_section)
+
+        current_email = self._current_account.email_address if self._current_account else "未登录"
+        acct_info = QLabel(f"📧 {current_email}")
+        acct_info.setStyleSheet("font-size:12px; color:#333;")
+        form.addRow("当前账户：", acct_info)
+
+        all_accs = self._db.get_all_accounts() if self._db else []
+        other_accs = [a for a in all_accs if a.id != (self._current_account_id or "")]
+
+        if other_accs:
+            switch_combo = QComboBox()
+            for a in other_accs:
+                switch_combo.addItem(a.email_address, a.id)
+            switch_btn = QPushButton("切换到此账户")
+
+            def _on_switch():
+                acc_id = switch_combo.currentData()
+                dlg.accept()
+                self._switch_account(acc_id)
+
+            switch_btn.clicked.connect(_on_switch)
+            switch_row = QHBoxLayout()
+            switch_row.addWidget(switch_combo, stretch=1)
+            switch_row.addWidget(switch_btn)
+            form.addRow("切换账户：", switch_row)
+
+        add_acct_btn = QPushButton("➕ 添加新账户")
+
+        def _on_add_acct():
+            from clawmail.ui.components.account_setup_dialog import AccountSetupDialog
+            setup_dlg = AccountSetupDialog(self._db, self._cred, parent=dlg)
+            if setup_dlg.exec():
+                dlg.accept()
+                self._switch_account(setup_dlg.account.id)
+
+        add_acct_btn.clicked.connect(_on_add_acct)
+        form.addRow(add_acct_btn)
+
+        logout_btn = QPushButton("🚪 登出当前账户")
+        logout_btn.setStyleSheet("color:#cc2200;")
+
+        def _on_logout():
+            if not self._current_account:
+                return
+            reply = QMessageBox.question(
+                dlg, "确认登出",
+                f"确定要登出 {current_email} 吗？\n本地邮件数据会保留，下次登录可继续使用。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            dlg.accept()
+            self._switch_account(None)
+
+        logout_btn.clicked.connect(_on_logout)
+        form.addRow(logout_btn)
+
         # ---- 数据管理 ----
         section_label = QLabel("数据管理")
         section_label.setStyleSheet(
@@ -2370,6 +2434,53 @@ class ClawMailApp(QMainWindow):
         self._refresh_category_list()
         self._refresh_urgency_list()
         self._refresh_todo_list()
+
+    def _switch_account(self, account_id: Optional[str]) -> None:
+        """停止当前服务，切换到目标账户并重启服务。account_id=None 表示登出。"""
+        if self._sync_service:
+            self._sync_service.stop()
+        if self._ai_service:
+            self._ai_service.stop()
+
+        if account_id is None:
+            self._current_account_id = None
+            self._current_account = None
+            self._email_list.clear()
+            self._content_view.setHtml(
+                "<p style='color:#888'>请在设置中登录账户</p>", QUrl("file:///")
+            )
+            self._refresh_todo_list()
+            self._status_bar.showMessage("已登出", 3000)
+
+            from clawmail.ui.components.account_setup_dialog import AccountSetupDialog
+            setup_dlg = AccountSetupDialog(self._db, self._cred, parent=self)
+            if setup_dlg.exec():
+                self._switch_account(setup_dlg.account.id)
+            return
+
+        self.set_current_account(account_id)
+
+        from clawmail.services.sync_service import SyncService
+        from clawmail.infrastructure.ai.ai_processor import AIProcessor
+        from clawmail.services.ai_service import AIService
+
+        account = self._current_account
+        if not account:
+            return
+
+        sync_svc = SyncService(self._db, self._cred)
+        self.set_sync_service(sync_svc, account_id=account.id)
+
+        ai_processor = AIProcessor(self._ai_bridge) if self._ai_bridge else None
+        if ai_processor:
+            ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
+            self.set_ai_service(ai_svc)
+            sync_svc.email_synced.connect(ai_svc.enqueue)
+            asyncio.ensure_future(ai_svc.start(account_id=account.id))
+
+        asyncio.ensure_future(sync_svc.start(account))
+        self._save_config({"last_account_id": account.id})
+        self._status_bar.showMessage(f"已切换到 {account.email_address}", 3000)
 
     # ----------------------------------------------------------------
     # ToDo 面板
