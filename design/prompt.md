@@ -43,26 +43,12 @@
 严格返回JSON，不要Markdown标记，所有字段必须存在：
 
 {
-  "keywords": [
-    "关键词1",
-    "关键词2",
-    "关键词3-5个"
-  ],
-
   "summary": {
     "one_line": "一句话核心概括（20字内）",
     "brief": "3-5行标准摘要",
-    "key_points": ["要点1", "要点2", "要点3"]
+    "key_points": ["要点1", "要点2", "要点3"],
+    "keywords": ["关键词1", "关键词2", "关键词3-5个"]
   },
-
-  "outline": [
-    {
-      "index": 1,
-      "title": "段落主题",
-      "content": "核心内容",
-      "type": "背景|核心信息|行动要求|问题|其他"
-    }
-  ],
 
   "action_items": [
     {
@@ -90,9 +76,7 @@
 当 AI 返回非法 JSON 或字段缺失时，使用以下默认值并设置 `ai_status='failed'`，放入重试队列：
 ```python
 DEFAULT_AI_RESULT = {
-    "keywords": [],
-    "summary": {"one_line": "", "brief": "", "key_points": []},
-    "outline": [],
+    "summary": {"one_line": "", "brief": "", "key_points": [], "keywords": []},
     "action_items": [],
     "metadata": {
         "category": [],
@@ -356,7 +340,6 @@ AI 分析邮件时使用的各评分标准 prompt 存储在用户数据目录下
 ~/clawmail_data/prompts/
 ├── importance_score.txt    # 重要性评分说明（0-100 评分标准）
 ├── category.txt            # 分类标签说明
-├── urgency.txt             # 紧急度说明
 ├── is_spam.txt             # 垃圾邮件判断说明
 ├── action_category.txt     # 行动项分类说明
 ├── reply_stances.txt       # 回复立场说明

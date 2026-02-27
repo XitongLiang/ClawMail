@@ -347,10 +347,6 @@ plugins/
 │   │   ├── __init__.py
 │   │   ├── plugin.py
 │   │   └── config.yaml
-│   └── keywords/                 # 关键词提取
-│       ├── __init__.py
-│       ├── plugin.py
-│       └── config.yaml
 └── custom/                       # 用户自定义插件（Git忽略）
     ├── __init__.py
     └── .gitkeep
@@ -614,7 +610,6 @@ plugins:
     - "email_summarize"
     - "smart_classify"
     - "extract_tasks"
-    - "keyword_extract"
   settings:
     smart_classify:
       categories: [由AI定义和设计]

@@ -202,34 +202,6 @@ class ThemeManager(QObject):
     def chat_timestamp_color(self) -> str:
         return "#606060" if self.is_dark() else "#aaaaaa"
 
-    # AI feedback panel
-    def feedback_bg(self) -> str:
-        return "#1a1f3a" if self.is_dark() else "#f5f7ff"
-
-    def feedback_border(self) -> str:
-        return "#3d4a8a" if self.is_dark() else "#c5cae9"
-
-    def feedback_title_color(self) -> str:
-        return "#8ea8e8" if self.is_dark() else "#3a4a9a"
-
-    def feedback_btn_bg(self) -> str:
-        return "#252a55" if self.is_dark() else "#e8ecfa"
-
-    def feedback_btn_border(self) -> str:
-        return "#4d5fa0" if self.is_dark() else "#9fa8da"
-
-    def feedback_btn_hover(self) -> str:
-        return "#2f366b" if self.is_dark() else "#d0d8f5"
-
-    def feedback_btn_disabled_fg(self) -> str:
-        return "#555555" if self.is_dark() else "#aaaaaa"
-
-    def feedback_btn_disabled_border(self) -> str:
-        return "#383838" if self.is_dark() else "#cccccc"
-
-    def feedback_btn_disabled_bg(self) -> str:
-        return "#252525" if self.is_dark() else "#f5f5f5"
-
     # Filter toggle checked state
     def filter_checked_bg(self) -> str:
         return "#1e3870" if self.is_dark() else "#c5d0f5"

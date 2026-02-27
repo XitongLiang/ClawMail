@@ -64,13 +64,8 @@ class EmailAIMetadata:
     email_id: str                              # 关联 emails.id
 
     # 统一提取结果（来自 Prompt #1）
-    keywords: Optional[List[str]] = None
-    summary_one_line: Optional[str] = None
-    summary_brief: Optional[str] = None
-    summary_key_points: Optional[List[str]] = None
-    outline: Optional[Dict] = None
+    summary: Optional[Dict] = None            # {"keywords":[], "one_line":"", "brief":"", "key_points":[]}
     categories: Optional[List[str]] = None    # 规范值见 tech_spec.md 第 3 节
-    urgency: Optional[str] = None             # "high" | "medium" | "low"
     sentiment: Optional[str] = None           # urgent/positive/negative/neutral
     suggested_reply: Optional[str] = None     # AI 生成的建议回复草稿
     is_spam: Optional[bool] = None            # AI 判断是否为垃圾邮件
@@ -89,3 +84,20 @@ class EmailAIMetadata:
     embedding_vector: Optional[bytes] = None
 
     updated_at: Optional[datetime] = None
+
+    # ── 向后兼容属性（旧字段已合并到 summary dict） ──
+    @property
+    def keywords(self) -> List[str]:
+        return (self.summary or {}).get("keywords", [])
+
+    @property
+    def summary_one_line(self) -> str:
+        return (self.summary or {}).get("one_line", "")
+
+    @property
+    def summary_brief(self) -> str:
+        return (self.summary or {}).get("brief", "")
+
+    @property
+    def summary_key_points(self) -> List[str]:
+        return (self.summary or {}).get("key_points", [])

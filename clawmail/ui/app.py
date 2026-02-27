@@ -331,68 +331,6 @@ class EmailWebView(QWebEngineView):
         s.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
 
 
-class _FbStarBar(QWidget):
-    """1-5 星评分条：hover 时左侧星星联动高亮，点击后锁定。"""
-
-    rating_selected = pyqtSignal(int)   # 发射 1-5
-
-    _CLR_OFF  = "#d0d0d0"
-    _CLR_HOVER  = "#ffc107"
-    _CLR_ON   = "#f5a623"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._rating = 0
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        self._btns: list = []
-        for i in range(1, 6):
-            btn = QPushButton("★")
-            btn.setFixedSize(30, 30)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.installEventFilter(self)
-            btn.clicked.connect(lambda _, n=i: self._on_click(n))
-            layout.addWidget(btn)
-            self._btns.append(btn)
-        layout.addStretch()
-        self._render(0, 0)
-
-    def eventFilter(self, obj, event):
-        if obj in self._btns:
-            idx = self._btns.index(obj) + 1
-            if event.type() == QEvent.Type.Enter:
-                self._render(self._rating, idx)
-            elif event.type() == QEvent.Type.Leave:
-                self._render(self._rating, 0)
-        return super().eventFilter(obj, event)
-
-    def _on_click(self, n: int):
-        self._rating = n
-        self._render(n, 0)
-        self.rating_selected.emit(n)
-
-    def _render(self, filled: int, hover: int):
-        active = max(filled, hover)
-        clr_off = "#555555" if get_theme().is_dark() else self._CLR_OFF
-        for i, btn in enumerate(self._btns, 1):
-            if i <= active:
-                clr = self._CLR_HOVER if (hover > 0 and i <= hover) else self._CLR_ON
-            else:
-                clr = clr_off
-            btn.setStyleSheet(
-                f"QPushButton{{border:none;background:transparent;"
-                f"font-size:22px;color:{clr};padding:0;}}"
-            )
-
-    def get_rating(self) -> int:
-        return self._rating
-
-    def reset(self):
-        self._rating = 0
-        self._render(0, 0)
-
-
 class ClawMailApp(QMainWindow):
     def __init__(self, db=None, cred_manager=None):
         super().__init__()
@@ -406,7 +344,6 @@ class ClawMailApp(QMainWindow):
         self._current_folder = "INBOX"
         self._sort_by_importance: bool = False
         self._current_category: Optional[str] = None  # AI 分类筛选
-        self._current_urgency: Optional[str] = None   # AI 紧急度筛选
         self._current_account_id: Optional[str] = None
         self._current_account = None
         self._current_email = None
@@ -429,8 +366,6 @@ class ClawMailApp(QMainWindow):
         self._pending_ai_task: Optional[asyncio.Task] = None
         self._ai_request_cancelled: bool = False
         self._ai_chat_mode: str = "user_chat"
-        self._feedback_email_id: Optional[str] = None
-        self._feedback_meta = None
         self._account_btn = None  # account switcher button in toolbar
         self._init_ui()
 
@@ -489,13 +424,6 @@ class ClawMailApp(QMainWindow):
         )
         self._category_list.currentItemChanged.connect(self._on_category_changed)
 
-        # AI 紧急度列表
-        self._urgency_list = QListWidget()
-        self._urgency_list.setStyleSheet(
-            "background:palette(window); border:none; padding:4px;"
-        )
-        self._urgency_list.currentItemChanged.connect(self._on_urgency_changed)
-
         left_panel = QWidget()
         left_panel.setStyleSheet("background:palette(window);")
         left_vbox = QVBoxLayout(left_panel)
@@ -518,15 +446,6 @@ class ClawMailApp(QMainWindow):
         )
         left_vbox.addWidget(category_header)
         left_vbox.addWidget(self._category_list)
-
-        urgency_header = QLabel("⚡ 紧急度")
-        urgency_header.setStyleSheet(
-            "padding:5px 10px; font-weight:bold; font-size:11px; "
-            "border-top:1px solid palette(mid); border-bottom:1px solid palette(mid);"
-            "background:palette(button);"
-        )
-        left_vbox.addWidget(urgency_header)
-        left_vbox.addWidget(self._urgency_list)
 
         splitter.addWidget(left_panel)
 
@@ -756,66 +675,6 @@ class ClawMailApp(QMainWindow):
 
         _cp_vbox.addWidget(_action_bar)
         _cp_vbox.addWidget(self._content_view, stretch=1)
-
-        # ── AI 摘要反馈面板（星评分） ──
-        _fb_theme = get_theme()
-        self._feedback_widget = QFrame()
-        self._feedback_widget.setStyleSheet(
-            f"QFrame{{background:{_fb_theme.feedback_bg()};border-top:1px solid {_fb_theme.feedback_border()};}}"
-        )
-        self._feedback_widget.setVisible(False)
-        _fb_vbox = QVBoxLayout(self._feedback_widget)
-        _fb_vbox.setContentsMargins(14, 8, 14, 10)
-        _fb_vbox.setSpacing(6)
-
-        self._fb_title = QLabel("对 AI 摘要评分：")
-        self._fb_title.setStyleSheet(
-            f"font-size:12px;color:{_fb_theme.feedback_title_color()};font-weight:bold;"
-        )
-        _fb_vbox.addWidget(self._fb_title)
-
-        _fb_star_row = QHBoxLayout()
-        _fb_star_row.setSpacing(4)
-        self._fb_star_bar = _FbStarBar()
-        _fb_star_row.addWidget(self._fb_star_bar)
-        _fb_star_row.addStretch()
-        _fb_vbox.addLayout(_fb_star_row)
-
-        self._fb_comment_edit = QTextEdit()
-        self._fb_comment_edit.setPlaceholderText("填写反馈意见（可选）…")
-        self._fb_comment_edit.setFixedHeight(58)
-        self._fb_comment_edit.setStyleSheet(
-            f"font-size:12px;border:1px solid {_fb_theme.feedback_border()};border-radius:3px;"
-        )
-        self._fb_comment_edit.setVisible(False)
-        _fb_vbox.addWidget(self._fb_comment_edit)
-
-        self._fb_submit_btn = QPushButton("提交")
-        self._fb_submit_btn.setFixedHeight(26)
-        self._fb_submit_btn.setEnabled(False)
-        self._fb_submit_btn.setStyleSheet(
-            f"QPushButton{{border:1px solid {_fb_theme.feedback_btn_border()};border-radius:3px;"
-            f"background:{_fb_theme.feedback_btn_bg()};color:{_fb_theme.feedback_title_color()};font-size:11px;padding:2px 14px;}}"
-            f"QPushButton:hover{{background:{_fb_theme.feedback_btn_hover()};}}"
-            f"QPushButton:disabled{{color:{_fb_theme.feedback_btn_disabled_fg()};"
-            f"border-color:{_fb_theme.feedback_btn_disabled_border()};"
-            f"background:{_fb_theme.feedback_btn_disabled_bg()};}}"
-        )
-        _fb_btn_row = QHBoxLayout()
-        _fb_btn_row.addStretch()
-        _fb_btn_row.addWidget(self._fb_submit_btn)
-        _fb_vbox.addLayout(_fb_btn_row)
-
-        _cp_vbox.addWidget(self._feedback_widget)
-
-        # 点星 → 显示评论框，激活提交按钮
-        self._fb_star_bar.rating_selected.connect(
-            lambda _: (
-                self._fb_comment_edit.setVisible(True),
-                self._fb_submit_btn.setEnabled(True),
-            )
-        )
-        self._fb_submit_btn.clicked.connect(self._on_feedback_submit)
 
         splitter.addWidget(_content_panel)
 
@@ -1191,7 +1050,6 @@ class ClawMailApp(QMainWindow):
         # 同步完成后刷新当前文件夹和分类栏
         self.refresh_email_list(self._current_folder)
         self._refresh_category_list()
-        self._refresh_urgency_list()
 
     @pyqtSlot(str)
     def _on_sync_error(self, msg: str):
@@ -1217,7 +1075,6 @@ class ClawMailApp(QMainWindow):
         folder = self._folder_display_map.get(display_name, display_name)
         self._current_folder = folder
         self._current_category = None
-        self._current_urgency = None
         # 清除搜索状态
         self._search_active = False
         self._email_list._search_active_flag = False
@@ -1237,11 +1094,6 @@ class ClawMailApp(QMainWindow):
         self._category_list.clearSelection()
         self._category_list.setCurrentRow(-1)
         self._category_list.blockSignals(False)
-        # 取消紧急度选中
-        self._urgency_list.blockSignals(True)
-        self._urgency_list.clearSelection()
-        self._urgency_list.setCurrentRow(-1)
-        self._urgency_list.blockSignals(False)
         # 收起筛选面板
         if hasattr(self, "_filter_panel") and self._filter_panel:
             self._filter_panel.setVisible(False)
@@ -1398,17 +1250,11 @@ class ClawMailApp(QMainWindow):
         if not cat_key:
             return
         self._current_category = cat_key
-        self._current_urgency = None
         # 取消文件夹列表选中
         self._folder_list.blockSignals(True)
         self._folder_list.clearSelection()
         self._folder_list.setCurrentRow(-1)
         self._folder_list.blockSignals(False)
-        # 取消紧急度选中
-        self._urgency_list.blockSignals(True)
-        self._urgency_list.clearSelection()
-        self._urgency_list.setCurrentRow(-1)
-        self._urgency_list.blockSignals(False)
         self._refresh_email_list_by_category(cat_key)
 
     @pyqtSlot(str, int)
@@ -1457,7 +1303,6 @@ class ClawMailApp(QMainWindow):
         if self._current_email and self._current_email.id == email_id:
             self._on_email_selected(self._email_list.currentItem(), None)
         self._refresh_category_list()
-        self._refresh_urgency_list()
         self._refresh_todo_list()
         # 更新右下角 AI 处理中指示
         self._ai_processing_done += 1
@@ -1527,26 +1372,7 @@ class ClawMailApp(QMainWindow):
                 meta = self._db.get_email_ai_metadata(email_id)
                 if meta and meta.ai_status == "processed":
                     ai_panel_html = self._build_ai_summary_html(meta)
-                    # 只对未打过分的邮件显示反馈面板
-                    with self._db.get_conn() as _fc:
-                        _fr = _fc.execute(
-                            "SELECT feedback_rating FROM email_ai_metadata WHERE email_id=?",
-                            (email_id,),
-                        ).fetchone()
-                    _already_rated = _fr and _fr[0] is not None
-                    if _already_rated:
-                        self._feedback_widget.setVisible(False)
-                    else:
-                        self._feedback_email_id = email_id
-                        self._feedback_meta = meta
-                        self._fb_star_bar.reset()
-                        self._fb_comment_edit.clear()
-                        self._fb_comment_edit.setVisible(False)
-                        self._feedback_widget.setEnabled(True)
-                        self._feedback_widget.setVisible(True)
-                else:
-                    self._feedback_widget.setVisible(False)
-                    if meta and meta.ai_status == "failed":
+                elif meta and meta.ai_status == "failed":
                         err_detail = ""
                         if meta.processing_error:
                             err_detail = (
@@ -1561,9 +1387,6 @@ class ClawMailApp(QMainWindow):
                         )
             except Exception as _ai_err:
                 import traceback; traceback.print_exc()
-                self._feedback_widget.setVisible(False)
-        else:
-            self._feedback_widget.setVisible(False)
 
         if email.body_html:
             html = header_html + ai_panel_html + email.body_html
@@ -1574,6 +1397,12 @@ class ClawMailApp(QMainWindow):
             )
         else:
             html = header_html + ai_panel_html + "<p style='padding:14px;'>[无邮件内容]</p>"
+
+        # 草稿箱中的回复邮件：追加原邮件引用
+        if self._current_folder == "草稿箱" and email.in_reply_to and self._db:
+            original = self._db.get_email(email.in_reply_to)
+            if original:
+                html += self._quoted_html(original)
 
         # 附件列表
         attachments = self._db.get_attachments_by_email(email_id) if self._db else []
@@ -1615,86 +1444,6 @@ class ClawMailApp(QMainWindow):
             accs = self._db.get_all_accounts() if self._db else []
             if accs:
                 asyncio.ensure_future(self._sync_service.run_once(accs[0]))
-
-    def _on_feedback_submit(self) -> None:
-        """收集星评分反馈，持久化到 DB，并发送给 OpenClaw。"""
-        rating = self._fb_star_bar.get_rating()
-        if rating == 0 or not self._feedback_email_id:
-            return
-
-        email   = self._db.get_email(self._feedback_email_id) if self._db else None
-        meta    = self._feedback_meta
-        comment = self._fb_comment_edit.toPlainText().strip()
-
-        subject   = (email.subject or "（无主题）") if email else "（未知）"
-        body_text = ((email.body_text or "")[:500]) if email else ""
-        summary   = (meta.summary_brief or meta.summary_one_line or "") if meta else ""
-
-        lines = [
-            "【AI摘要用户评分反馈】",
-            f"邮件主题：{subject}",
-            f"邮件内容（前500字）：{body_text}",
-            "",
-            f"AI生成摘要：{summary}",
-            "",
-            f"用户评分：{rating}/5 星",
-        ]
-        if comment:
-            lines.append(f"反馈意见：{comment}")
-        prompt = "\n".join(lines)
-
-        # 持久化评分到 DB
-        if self._db:
-            try:
-                with self._db.get_conn() as conn:
-                    conn.execute(
-                        "UPDATE email_ai_metadata SET feedback_rating=? WHERE email_id=?",
-                        (rating, self._feedback_email_id),
-                    )
-                    conn.commit()
-            except Exception:
-                pass
-
-        # 隐藏面板（已评分）
-        self._feedback_widget.setVisible(False)
-
-        # 在聊天框显示用户侧摘要（简洁格式）
-        star_str = "★" * rating + "☆" * (5 - rating)
-        chat_user_text = (
-            f"📧 邮件：{subject}\n"
-            f"摘要评分：{star_str} ({rating}/5)\n"
-            f"反馈意见：{comment or '（无）'}"
-        )
-        self._append_user_message(chat_user_text)
-
-        if not self._ai_bridge:
-            self._append_ai_message("（AI 未连接，评分已保存）")
-            self._status_bar.showMessage("✅ 评分已保存", 3000)
-            return
-
-        self._show_typing()
-        self._input_line.setEnabled(False)
-        self._send_btn.setEnabled(False)
-        self._status_bar.showMessage("正在提交反馈…", 2000)
-
-        async def _send():
-            try:
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: self._ai_bridge.user_chat(prompt, "personalizationAgent001"),
-                )
-                self._append_ai_message(response)
-                self._status_bar.showMessage("✅ 反馈已提交，感谢！", 3000)
-            except Exception as e:
-                self._append_ai_message(f"（反馈发送失败：{e}）")
-                self._status_bar.showMessage("✅ 评分已保存（发送失败）", 3000)
-            finally:
-                self._hide_typing()
-                self._input_line.setEnabled(True)
-                self._send_btn.setEnabled(True)
-
-        asyncio.ensure_future(_send())
 
     def _on_settings(self):
         """打开设置对话框。"""
@@ -2054,33 +1803,6 @@ class ClawMailApp(QMainWindow):
         if hasattr(self, "_content_view") and self._content_view:
             _bg = QColor("#1e1e1e") if tm.is_dark() else QColor("#ffffff")
             self._content_view.page().setBackgroundColor(_bg)
-
-        # AI feedback panel
-        if hasattr(self, "_feedback_widget") and self._feedback_widget:
-            self._feedback_widget.setStyleSheet(
-                f"QFrame{{background:{tm.feedback_bg()};border-top:1px solid {tm.feedback_border()};}}"
-            )
-        if hasattr(self, "_fb_title") and self._fb_title:
-            self._fb_title.setStyleSheet(
-                f"font-size:12px;color:{tm.feedback_title_color()};font-weight:bold;"
-            )
-        if hasattr(self, "_fb_comment_edit") and self._fb_comment_edit:
-            self._fb_comment_edit.setStyleSheet(
-                f"font-size:12px;border:1px solid {tm.feedback_border()};border-radius:3px;"
-            )
-        if hasattr(self, "_fb_submit_btn") and self._fb_submit_btn:
-            self._fb_submit_btn.setStyleSheet(
-                f"QPushButton{{border:1px solid {tm.feedback_btn_border()};border-radius:3px;"
-                f"background:{tm.feedback_btn_bg()};color:{tm.feedback_title_color()};font-size:11px;padding:2px 14px;}}"
-                f"QPushButton:hover{{background:{tm.feedback_btn_hover()};}}"
-                f"QPushButton:disabled{{color:{tm.feedback_btn_disabled_fg()};"
-                f"border-color:{tm.feedback_btn_disabled_border()};"
-                f"background:{tm.feedback_btn_disabled_bg()};}}"
-            )
-
-        # Star bar
-        if hasattr(self, "_fb_star_bar") and self._fb_star_bar:
-            self._fb_star_bar._render(self._fb_star_bar.get_rating(), 0)
 
         # Filter toggle checked state
         if hasattr(self, "_filter_toggle_btn") and self._filter_toggle_btn:
@@ -2746,15 +2468,24 @@ class ClawMailApp(QMainWindow):
         if count >= 5 and self._ai_bridge:
             self._trigger_personalization("importance_score")
 
+    # email_generation 需要同时更新两个 prompt
+    _PROMPT_PATHS_MAP: dict = {
+        "email_generation": ["reply_draft", "generate_email"],
+    }
+
     def _trigger_personalization(self, prompt_type: str) -> None:
         """反馈累积 ≥5 条，向 OpenClaw 发消息触发 clawmail-personalization skill。
         触发前先归档当前反馈和 prompt（保险：防止 OpenClaw 绕过 API 直接操作文件）。"""
         from datetime import datetime as _dt
         import shutil as _shutil
+
+        prompts_dir = self._db.data_dir / "prompts"
+        prompt_archive_dir_path = prompts_dir / "archive"
         feedback_file = self._db.data_dir / "feedback" / f"feedback_{prompt_type}.jsonl"
         feedback_archive_dir = self._db.data_dir / "feedback" / prompt_type
-        prompt_file = self._db.data_dir / "prompts" / f"{prompt_type}.txt"
-        prompt_archive_dir_path = self._db.data_dir / "prompts" / "archive"
+
+        # 确定要更新的 prompt 文件列表
+        prompt_names = self._PROMPT_PATHS_MAP.get(prompt_type, [prompt_type])
 
         # 保险归档：反馈
         try:
@@ -2765,25 +2496,29 @@ class ClawMailApp(QMainWindow):
         except Exception:
             pass
 
-        # 保险归档：当前 prompt
-        try:
-            if prompt_file.exists():
-                prompt_archive_dir_path.mkdir(exist_ok=True)
-                date_str = _dt.now().strftime("%Y-%m-%d_%H%M%S")
-                _shutil.copy2(str(prompt_file), str(prompt_archive_dir_path / f"{prompt_type}_{date_str}.txt"))
-        except Exception:
-            pass
+        # 保险归档：所有相关 prompt
+        for pname in prompt_names:
+            try:
+                pf = prompts_dir / f"{pname}.txt"
+                if pf.exists():
+                    prompt_archive_dir_path.mkdir(exist_ok=True)
+                    date_str = _dt.now().strftime("%Y-%m-%d_%H%M%S")
+                    _shutil.copy2(str(pf), str(prompt_archive_dir_path / f"{pname}_{date_str}.txt"))
+            except Exception:
+                pass
 
         feedback_path = str(feedback_file)
-        prompt_path = str(prompt_file)
         archive_dir = str(feedback_archive_dir)
         prompt_archive_dir = str(prompt_archive_dir_path)
+        prompt_paths_str = str(prompt_names)
 
         trigger_msg = (
-            f"(ClawMail-Personalization) 用户已累积足够的重要性评分反馈，请触发 clawmail-personalization skill。\n"
+            f"(ClawMail-Personalization) 用户已累积足够的{prompt_type}反馈，"
+            f"请触发 clawmail-personalization skill。\n"
             f"feedback_type: {prompt_type}\n"
             f"feedback_path: {feedback_path}\n"
-            f"prompt_path: {prompt_path}\n"
+            f"prompt_paths: {prompt_paths_str}\n"
+            f"related_prompts: []\n"
             f"archive_dir: {archive_dir}\n"
             f"prompt_archive_dir: {prompt_archive_dir}\n"
         )
@@ -2867,12 +2602,6 @@ class ClawMailApp(QMainWindow):
         "notification":  "🟢 通知",
         "subscription":  "⚫ 订阅",
     }
-    _URGENCY_LABELS = {
-        "high":   "🔴 高",
-        "medium": "🟡 中",
-        "low":    "🟢 低",
-    }
-
     def _refresh_category_list(self) -> None:
         """从数据库读取所有分类标签，刷新左侧分类栏。"""
         if not self._db or not self._current_account_id:
@@ -2906,50 +2635,6 @@ class ClawMailApp(QMainWindow):
             return
         emails = self._db.get_emails_by_category(
             self._current_account_id, cat_key, limit=100
-        )
-        for email in emails:
-            self._append_email_item(email)
-
-    def _refresh_urgency_list(self) -> None:
-        """从数据库读取各紧急度邮件数，刷新左侧紧急度栏。"""
-        if not self._db or not self._current_account_id:
-            return
-        counts = self._db.get_urgency_counts(self._current_account_id)
-        self._urgency_list.blockSignals(True)
-        self._urgency_list.clear()
-        for key in ("high", "medium", "low"):
-            if key in counts:
-                item = QListWidgetItem(self._URGENCY_LABELS[key])
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                self._urgency_list.addItem(item)
-        self._urgency_list.blockSignals(False)
-
-    def _on_urgency_changed(self, current: QListWidgetItem, _prev) -> None:
-        if not current:
-            return
-        key = current.data(Qt.ItemDataRole.UserRole)
-        if not key:
-            return
-        self._current_urgency = key
-        # 取消文件夹和分类的选中
-        self._folder_list.blockSignals(True)
-        self._folder_list.clearSelection()
-        self._folder_list.setCurrentRow(-1)
-        self._folder_list.blockSignals(False)
-        self._category_list.blockSignals(True)
-        self._category_list.clearSelection()
-        self._category_list.setCurrentRow(-1)
-        self._category_list.blockSignals(False)
-        self._current_category = None
-        self._refresh_email_list_by_urgency(key)
-
-    def _refresh_email_list_by_urgency(self, urgency_key: str) -> None:
-        """按紧急度筛选并展示邮件列表。"""
-        self._email_list.clear()
-        if not self._db or not self._current_account_id:
-            return
-        emails = self._db.get_emails_by_urgency(
-            self._current_account_id, urgency_key, limit=100
         )
         for email in emails:
             self._append_email_item(email)
@@ -3130,7 +2815,6 @@ class ClawMailApp(QMainWindow):
         self._refresh_account_btn()
         self.refresh_email_list(self._current_folder)
         self._refresh_category_list()
-        self._refresh_urgency_list()
         self._refresh_todo_list()
 
     def _switch_account(self, account_id: Optional[str]) -> None:

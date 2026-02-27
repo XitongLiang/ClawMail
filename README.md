@@ -39,7 +39,6 @@
 - **Automatic pipeline** — every new email triggers a single OpenClaw/Kimi API call that produces all of the below in one round-trip
 - **One-line summary** — shown in the email list as a preview subtitle
 - **Smart classification** — 6 system tags (urgent, pending reply, notification, subscription, meeting, approval) plus dynamic project tags; clickable sidebar filter
-- **Urgency detection** — separate urgency sidebar filter (urgent / normal / low)
 - **Task extraction** — action items from email body are surfaced automatically in the To Do panel
 - **AI feedback** — 1–5 star rating + comment on any AI summary; feedback logged for model improvement
 - **Offline graceful degradation** — if AI is unavailable, emails appear immediately with a `⚠` badge and are queued for later analysis
@@ -525,7 +524,7 @@ To remove an account, select **Remove Current Account** from the dropdown. All l
 |---|---|---|
 | 0 — Infrastructure | ✅ Done | SQLite, keyring, minimal UI skeleton |
 | 1 — Email basics | ✅ Done | IMAP sync, HTML rendering, compose/reply/draft, folder nav, search |
-| 2 — AI core | ✅ Done | OpenClaw pipeline, summaries, classification, urgency, task extraction |
+| 2 — AI core | ✅ Done | OpenClaw pipeline, summaries, classification, task extraction |
 | 3 — To Do panel | ✅ Done | Task CRUD, groups, snooze, search, AI extraction |
 | 4 — AI assistant | ✅ Done | AI chat panel, streaming, compose assist, feedback rating |
 | Multi-account | ✅ Done | Account switcher, modern login dialog, Microsoft OAuth |

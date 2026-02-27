@@ -65,6 +65,15 @@ class ComposeDialog(QDialog):
         self._selected_stance = None
         self._selected_tone   = None
 
+        # 隐式反馈追踪：邮件生成（reply_draft + generate_email）
+        self._ai_draft_text: str | None = None       # AI 生成的原始正文
+        self._ai_draft_source: str | None = None     # "reply_draft" 或 "generate_email"
+        self._ai_draft_context: dict = {}             # stance, tone, outline 等上下文
+        # 隐式反馈追踪：润色
+        self._pre_polish_text: str | None = None      # 润色前的正文
+        self._polished_text: str | None = None         # AI 润色后的正文
+        self._polish_tone: str | None = None           # 润色时选择的风格
+
         # 附件：文件绝对路径列表（可由 API 预填）
         self._attachments: list = list(initial_attachments or [])
 
@@ -390,6 +399,10 @@ class ComposeDialog(QDialog):
                 body,
                 self._polish_selected_tone,
             )
+            # 保存润色前后文本用于隐式反馈
+            self._pre_polish_text = body
+            self._polished_text = polished
+            self._polish_tone = self._polish_selected_tone
             self._fill_draft(polished)
         except Exception as e:
             QMessageBox.warning(self, "润色失败", str(e))
@@ -417,6 +430,13 @@ class ComposeDialog(QDialog):
                 outline,
                 self._polish_selected_tone,
             )
+            # 保存 AI 生成正文用于隐式反馈
+            self._ai_draft_text = generated
+            self._ai_draft_source = "generate_email"
+            self._ai_draft_context = {
+                "outline": outline,
+                "tone": self._polish_selected_tone,
+            }
             self._fill_draft(generated)
         except Exception as e:
             QMessageBox.warning(self, "生成失败", str(e))
@@ -559,6 +579,13 @@ class ComposeDialog(QDialog):
                 self._selected_tone,
                 self._notes_input.text().strip(),
             )
+            # 保存 AI 草稿用于隐式反馈
+            self._ai_draft_text = draft
+            self._ai_draft_source = "reply_draft"
+            self._ai_draft_context = {
+                "stance": self._selected_stance,
+                "tone": self._selected_tone,
+            }
             self._fill_draft(draft)
         except Exception as e:
             QMessageBox.warning(self, "生成失败", str(e))
@@ -848,6 +875,9 @@ class ComposeDialog(QDialog):
                         except Exception:
                             pass
                     conn.commit()
+            # ── 隐式反馈：比对 AI 生成 / 润色 与最终版本 ──
+            self._record_implicit_feedback(body)
+
             parent = self.parent()
             if parent and hasattr(parent, "_status_bar"):
                 parent._status_bar.showMessage("✅ 发送成功，正在同步已发送…", 4000)
@@ -864,6 +894,78 @@ class ComposeDialog(QDialog):
             self._status_label.setText("")
             self._send_btn.setEnabled(True)
             QMessageBox.critical(self, "发送失败", str(e))
+
+    def _record_implicit_feedback(self, final_body: str) -> None:
+        """发送成功后，比对 AI 生成 / 润色版本与用户最终版本，记录隐式反馈。"""
+        from difflib import SequenceMatcher
+
+        if not self._db:
+            return
+
+        subject = self._subject_edit.text().strip()
+
+        # ── 邮件生成反馈（reply_draft / generate_email）──
+        if self._ai_draft_text is not None and final_body:
+            ratio = SequenceMatcher(
+                None, self._ai_draft_text, final_body
+            ).ratio()
+            if ratio < 0.95:
+                source = self._ai_draft_source or "reply_draft"
+                # 确定 email_id
+                if source == "reply_draft" and self._source_email:
+                    email_id = self._source_email.id
+                else:
+                    email_id = self._draft_id or str(_uuid.uuid4())
+                # 从 AI 元数据中提取摘要上下文
+                kw = self._ai_metadata.keywords if self._ai_metadata else None
+                ol = (self._ai_metadata.summary_one_line
+                      if self._ai_metadata else None)
+                self._db.record_email_generation_feedback(
+                    email_id=email_id,
+                    source=source,
+                    subject=subject,
+                    ai_draft=self._ai_draft_text,
+                    user_final=final_body,
+                    similarity_ratio=ratio,
+                    stance=self._ai_draft_context.get("stance"),
+                    tone=self._ai_draft_context.get("tone"),
+                    outline=self._ai_draft_context.get("outline"),
+                    keywords=kw,
+                    one_line=ol,
+                )
+                # 检查是否触发个性化
+                parent = self.parent()
+                count = self._db.get_feedback_count("email_generation")
+                if (count >= 5 and parent
+                        and hasattr(parent, "_trigger_personalization")
+                        and getattr(parent, "_ai_bridge", None)):
+                    parent._trigger_personalization("email_generation")
+
+        # ── 润色反馈 ──
+        if self._polished_text is not None and final_body:
+            ratio = SequenceMatcher(
+                None, self._polished_text, final_body
+            ).ratio()
+            if ratio < 0.95:
+                if self._source_email:
+                    email_id = self._source_email.id
+                else:
+                    email_id = self._draft_id or str(_uuid.uuid4())
+                self._db.record_polish_email_feedback(
+                    email_id=email_id,
+                    subject=subject,
+                    tone=self._polish_tone or "",
+                    original_body=self._pre_polish_text or "",
+                    polished_body=self._polished_text,
+                    user_final=final_body,
+                    similarity_ratio=ratio,
+                )
+                parent = self.parent()
+                count = self._db.get_feedback_count("polish_email")
+                if (count >= 5 and parent
+                        and hasattr(parent, "_trigger_personalization")
+                        and getattr(parent, "_ai_bridge", None)):
+                    parent._trigger_personalization("polish_email")
 
     async def _send_via_graph(self, to_addresses, cc_addresses, subject, body,
                               html_body, attachments):

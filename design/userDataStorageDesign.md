@@ -26,15 +26,33 @@ clawmail_data/                      # 用户数据主目录
 │   ├── polishAgent001.log          # AI 润色邮件对话
 │   └── personalizationAgent001.log # 个性化反馈/触发对话
 ├── feedback/                       # 用户反馈数据（个性化闭环）
-│   ├── feedback_importance_score.jsonl  # 重要性评分修改记录（按 email_id 去重）
-│   └── importance_score/           # 已消费的历史反馈存档（带时间戳）
-├── prompts/                        # AI 评分标准 prompt（可由 OpenClaw skill 动态更新）
-│   ├── importance_score.txt        # 重要性评分说明
+│   ├── feedback_importance_score.jsonl  # 重要性评分反馈（按 email_id 去重）
+│   ├── feedback_category.jsonl          # 分类标签反馈（按 email_id 去重）
+│   ├── feedback_is_spam.jsonl           # 垃圾邮件检测反馈（按 email_id 去重）
+│   ├── feedback_action_category.jsonl   # 行动项分类反馈（按 email_id+index 去重）
+│   ├── feedback_reply_stances.jsonl     # 回复立场反馈（按 email_id 去重）
+│   ├── feedback_summary.jsonl           # 摘要质量反馈（按 email_id 去重）
+│   ├── feedback_reply_draft.jsonl       # 回复草稿反馈（按 email_id 去重）
+│   ├── feedback_polish_email.jsonl      # 润色反馈（按 email_id 去重）
+│   ├── importance_score/           # 重要性评分反馈存档（带时间戳）
+│   ├── category/                   # 分类标签反馈存档
+│   ├── is_spam/                    # 垃圾邮件检测反馈存档
+│   ├── action_category/            # 行动项分类反馈存档
+│   ├── reply_stances/              # 回复立场反馈存档
+│   ├── summary/                    # 摘要质量反馈存档
+│   ├── reply_draft/                # 回复草稿反馈存档
+│   └── polish_email/               # 润色反馈存档
+├── prompts/                        # AI prompt（可由 OpenClaw skill 动态更新）
+│   ├── summary.txt                 # 摘要生成说明（含关键词、大纲）
 │   ├── category.txt                # 分类说明
-│   ├── urgency.txt                 # 紧急度说明
 │   ├── is_spam.txt                 # 垃圾邮件说明
 │   ├── action_category.txt         # 行动项分类说明
 │   ├── reply_stances.txt           # 回复立场说明
+│   ├── importance_score.txt        # 重要性评分说明
+│   ├── mail_analysis.txt           # 邮件分析主模板
+│   ├── reply_draft.txt             # 回复草稿模板
+│   ├── generate_email.txt          # 写邮件模板
+│   ├── polish_email.txt            # 润色模板
 │   └── archive/                    # 旧版 prompt 存档（更新前自动备份）
 ├── exports/                        # 用户导出数据
 │   └── 2024-01-15_backup.zip
@@ -142,20 +160,16 @@ CREATE TABLE emails (
 CREATE TABLE email_ai_metadata (
     email_id TEXT PRIMARY KEY,
     
-    -- 统一提取结果
-    keywords TEXT,                          -- JSON数组
-    summary_one_line TEXT,                  -- 一句话摘要
-    summary_brief TEXT,                     -- 标准摘要
-    summary_key_points TEXT,                -- JSON数组要点
-    
-    outline TEXT,                           -- JSON大纲结构
+    -- 统一提取结果（v2: 合并为单列）
+    -- [DEPRECATED] keywords, summary_one_line, summary_brief, summary_key_points, outline
+    --   已合并为下方 summary 列，旧列在迁移后删除
+    summary TEXT,                           -- JSON: {"keywords": [...], "one_line": "...", "brief": "...", "key_points": [...]}
     categories TEXT,                        -- JSON分类标签数组（规范值见 tech_spec.md 第3节）
     sentiment TEXT,                         -- urgent/positive/negative/neutral
     suggested_reply TEXT,                   -- AI生成的建议回复草稿（可为空）
     is_spam INTEGER DEFAULT NULL,           -- 1=垃圾邮件，0=正常
     action_items TEXT,                      -- JSON行动项数组
     reply_stances TEXT,                     -- JSON回复立场数组
-    urgency TEXT CHECK(urgency IN ('high','medium','low') OR urgency IS NULL),
     importance_score INTEGER CHECK(importance_score BETWEEN 0 AND 100 OR importance_score IS NULL),
     feedback_rating INTEGER CHECK(feedback_rating BETWEEN 1 AND 5 OR feedback_rating IS NULL),
 
@@ -348,8 +362,9 @@ CREATE VIRTUAL TABLE emails_fts USING fts5(
     content_rowid='rowid',
     tokenize='unicode61'                    -- 支持中文、日文等 Unicode 字符
 );
--- 注：summary_one_line / keywords 存储在 email_ai_metadata 表，
+-- 注：m.summary（JSON 列）存储在 email_ai_metadata 表，
 --     无法通过 content='emails' 的 FTS5 表统一索引。
+--     关键字/摘要检索可用 m.summary LIKE ? 作简单匹配，
 --     AI 字段的全文检索在 Phase 5 通过 ChromaDB 向量搜索覆盖。
 
 -- 触发器：保持 FTS5 索引与 emails 表同步
@@ -444,13 +459,10 @@ class Email:
 @dataclass
 class EmailAIMetadata:
     email_id: str
-    keywords: List[str] = None
-    summary_one_line: Optional[str] = None
-    summary_brief: Optional[str] = None
-    summary_key_points: List[str] = None
-    outline: List[Dict] = None
+    summary: Optional[Dict] = None          # JSON: {"keywords": [...], "one_line": "...", "brief": "...", "key_points": [...]}
+    # Backward-compatible properties: .keywords, .one_line, .brief, .key_points
+    #   each reads from summary dict; setter updates the dict in-place
     categories: List[str] = None
-    urgency: Optional[str] = None             # "high" | "medium" | "low"
     sentiment: Optional[str] = None
     suggested_reply: Optional[str] = None
     is_spam: Optional[bool] = None
@@ -467,9 +479,7 @@ class EmailAIMetadata:
     updated_at: Optional[datetime] = None
 
     def __post_init__(self):
-        if self.keywords is None: self.keywords = []
-        if self.summary_key_points is None: self.summary_key_points = []
-        if self.outline is None: self.outline = []
+        if self.summary is None: self.summary = {}
         if self.categories is None: self.categories = []
 
 @dataclass
@@ -518,6 +528,13 @@ class StorageManager:
                        self.data_dir / 'chat_logs',
                        self.data_dir / 'feedback',
                        self.data_dir / 'feedback' / 'importance_score',
+                       self.data_dir / 'feedback' / 'category',
+                       self.data_dir / 'feedback' / 'is_spam',
+                       self.data_dir / 'feedback' / 'action_category',
+                       self.data_dir / 'feedback' / 'reply_stances',
+                       self.data_dir / 'feedback' / 'summary',
+                       self.data_dir / 'feedback' / 'reply_draft',
+                       self.data_dir / 'feedback' / 'polish_email',
                        self.data_dir / 'prompts',
                        self.data_dir / 'prompts' / 'archive',
                        self.data_dir / 'logs']:
@@ -679,8 +696,8 @@ class StorageManager:
                             limit: int = 50, offset: int = 0) -> List[Email]:
         with self._connect() as conn:
             rows = conn.execute("""
-                SELECT e.*, 
-                       m.summary_one_line, m.summary_brief, 
+                SELECT e.*,
+                       m.summary,
                        m.categories, m.ai_status, m.processing_progress
                 FROM emails e
                 LEFT JOIN email_ai_metadata m ON e.id = m.email_id
@@ -696,11 +713,7 @@ class StorageManager:
         with self._connect() as conn:
             conn.execute("""
                 UPDATE email_ai_metadata SET
-                    keywords = ?,
-                    summary_one_line = ?,
-                    summary_brief = ?,
-                    summary_key_points = ?,
-                    outline = ?,
+                    summary = ?,
                     categories = ?,
                     sentiment = ?,
                     suggested_reply = ?,
@@ -711,11 +724,7 @@ class StorageManager:
                     updated_at = ?
                 WHERE email_id = ?
             """, (
-                json.dumps(metadata.keywords, ensure_ascii=False),
-                metadata.summary_one_line,
-                metadata.summary_brief,
-                json.dumps(metadata.summary_key_points, ensure_ascii=False),
-                json.dumps(metadata.outline, ensure_ascii=False),
+                json.dumps(metadata.summary, ensure_ascii=False),
                 json.dumps(metadata.categories, ensure_ascii=False),
                 metadata.sentiment,
                 metadata.suggested_reply,
@@ -984,11 +993,10 @@ class StorageManager:
             sync_status=row['sync_status']
         )
         
-        if with_ai_preview and 'summary_one_line' in row.keys():
+        if with_ai_preview and 'summary' in row.keys():
             email.ai_metadata = EmailAIMetadata(
                 email_id=row['id'],
-                summary_one_line=row['summary_one_line'],
-                summary_brief=row['summary_brief'],
+                summary=json.loads(row['summary']) if row['summary'] else {},
                 categories=json.loads(row['categories']) if row['categories'] else [],
                 ai_status=row['ai_status'],
                 processing_progress=row['processing_progress']
@@ -999,11 +1007,7 @@ class StorageManager:
     def _row_to_ai_metadata(self, row) -> EmailAIMetadata:
         return EmailAIMetadata(
             email_id=row['email_id'],
-            keywords=json.loads(row['keywords']) if row['keywords'] else [],
-            summary_one_line=row['summary_one_line'],
-            summary_brief=row['summary_brief'],
-            summary_key_points=json.loads(row['summary_key_points']) if row['summary_key_points'] else [],
-            outline=json.loads(row['outline']) if row['outline'] else [],
+            summary=json.loads(row['summary']) if row['summary'] else {},
             categories=json.loads(row['categories']) if row['categories'] else [],
             sentiment=row['sentiment'],
             ai_status=row['ai_status'],
@@ -1057,9 +1061,12 @@ email_id = storage.save_email(email)
 # 更新AI处理结果
 ai_result = EmailAIMetadata(
     email_id=email_id,
-    keywords=["Q4项目", "延期", "进度"],
-    summary_one_line="张三申请项目延期两周",
-    summary_brief="Q4项目因供应商延迟申请延期，预计影响...",
+    summary={
+        "keywords": ["Q4项目", "延期", "进度"],
+        "one_line": "张三申请项目延期两周",
+        "brief": "Q4项目因供应商延迟申请延期，预计影响...",
+        "key_points": ["项目已完成80%", "预计延期两周", "供应商延迟为主因"]
+    },
     categories=["紧急", "项目A"],
     ai_status="processed",
     processing_progress=100

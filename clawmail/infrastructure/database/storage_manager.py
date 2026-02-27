@@ -95,11 +95,12 @@ CREATE TABLE IF NOT EXISTS emails (
 -- 3. AI 处理结果表
 CREATE TABLE IF NOT EXISTS email_ai_metadata (
     email_id TEXT PRIMARY KEY,
-    keywords TEXT,
-    summary_one_line TEXT,
-    summary_brief TEXT,
-    summary_key_points TEXT,
-    outline TEXT,
+    keywords TEXT,                  -- 已废弃，保留兼容
+    summary_one_line TEXT,          -- 已废弃，保留兼容
+    summary_brief TEXT,             -- 已废弃，保留兼容
+    summary_key_points TEXT,        -- 已废弃，保留兼容
+    outline TEXT,                   -- 已废弃，保留兼容
+    summary TEXT,                   -- JSON: {keywords, one_line, brief, key_points}
     categories TEXT,
     sentiment TEXT
         CHECK(sentiment IN ('urgent', 'positive', 'negative', 'neutral') OR sentiment IS NULL),
@@ -107,9 +108,7 @@ CREATE TABLE IF NOT EXISTS email_ai_metadata (
     is_spam INTEGER DEFAULT NULL,
     action_items TEXT,
     reply_stances TEXT,
-    urgency TEXT CHECK(urgency IN ('high','medium','low') OR urgency IS NULL),
     importance_score INTEGER CHECK(importance_score BETWEEN 0 AND 100 OR importance_score IS NULL),
-    feedback_rating INTEGER CHECK(feedback_rating BETWEEN 1 AND 5 OR feedback_rating IS NULL),
     ai_status TEXT DEFAULT 'unprocessed'
         CHECK(ai_status IN ('unprocessed', 'processing', 'processed', 'failed', 'skipped')),
     processing_progress INTEGER DEFAULT 0,
@@ -306,6 +305,8 @@ class ClawDB:
         # 创建 feedback 目录（用户反馈数据）及归档子目录
         (self.data_dir / "feedback").mkdir(exist_ok=True)
         (self.data_dir / "feedback" / "importance_score").mkdir(exist_ok=True)
+        (self.data_dir / "feedback" / "email_generation").mkdir(exist_ok=True)
+        (self.data_dir / "feedback" / "polish_email").mkdir(exist_ok=True)
 
         # 创建 chat_logs 目录（AI 对话记录）
         (self.data_dir / "chat_logs").mkdir(exist_ok=True)
@@ -314,11 +315,26 @@ class ClawDB:
         _prompts_dir = self.data_dir / "prompts"
         _prompts_dir.mkdir(exist_ok=True)
         (_prompts_dir / "archive").mkdir(exist_ok=True)
-        from clawmail.infrastructure.ai.ai_processor import DEFAULT_PROMPT_SECTIONS
+        from clawmail.infrastructure.ai.ai_processor import (
+            DEFAULT_PROMPT_SECTIONS,
+            _PROMPT_TEMPLATE, _DRAFT_PROMPT_TEMPLATE,
+            _GENERATE_PROMPT_TEMPLATE, _POLISH_PROMPT_TEMPLATE,
+        )
+        # prompt sections（summary, category 等）
         for _name, _content in DEFAULT_PROMPT_SECTIONS.items():
             _f = _prompts_dir / f"{_name}.txt"
             if not _f.exists():
                 _f.write_text(_content, encoding="utf-8")
+        # 4 个模板 prompt
+        for _name, _tpl in [
+            ("mail_analysis", _PROMPT_TEMPLATE),
+            ("reply_draft", _DRAFT_PROMPT_TEMPLATE),
+            ("generate_email", _GENERATE_PROMPT_TEMPLATE),
+            ("polish_email", _POLISH_PROMPT_TEMPLATE),
+        ]:
+            _f = _prompts_dir / f"{_name}.txt"
+            if not _f.exists():
+                _f.write_text(_tpl.strip(), encoding="utf-8")
 
         with self.get_conn() as conn:
             # PRAGMA 语句需逐条执行
@@ -353,12 +369,10 @@ class ClawDB:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN action_items TEXT")
             if "reply_stances" not in ai_cols:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN reply_stances TEXT")
-            if "urgency" not in ai_cols:
-                conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN urgency TEXT")
-            if "feedback_rating" not in ai_cols:
-                conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN feedback_rating INTEGER")
             if "importance_score" not in ai_cols:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN importance_score INTEGER")
+            if "summary" not in ai_cols:
+                conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN summary TEXT")
             conn.commit()
 
     @contextmanager
@@ -407,8 +421,20 @@ class ClawDB:
             return self._row_to_account(row) if row else None
 
     def delete_account(self, account_id: str) -> None:
-        """Delete an account and all its associated emails."""
+        """Delete an account, all its associated emails, and attachment files."""
         with self.get_conn() as conn:
+            # 1. Get all email IDs for this account
+            email_ids = [
+                row[0] for row in conn.execute(
+                    "SELECT id FROM emails WHERE account_id = ?", (account_id,)
+                ).fetchall()
+            ]
+
+            # 2. Delete attachment files for all emails
+            for email_id in email_ids:
+                self._delete_attachment_files(email_id)
+
+            # 3. Delete database records (cascades to attachments table)
             conn.execute("DELETE FROM emails WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
             conn.commit()
@@ -536,27 +562,21 @@ class ClawDB:
         with self.get_conn() as conn:
             conn.execute(
                 """INSERT INTO email_ai_metadata (
-                    email_id, keywords, summary_one_line, summary_brief,
-                    summary_key_points, outline, categories, sentiment,
+                    email_id, summary, categories, sentiment,
                     suggested_reply, is_spam, action_items, reply_stances,
-                    urgency, importance_score,
+                    importance_score,
                     ai_status, processing_progress,
                     processing_stage, processed_at, processing_error,
                     embedding_vector, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(email_id) DO UPDATE SET
-                    keywords = excluded.keywords,
-                    summary_one_line = excluded.summary_one_line,
-                    summary_brief = excluded.summary_brief,
-                    summary_key_points = excluded.summary_key_points,
-                    outline = excluded.outline,
+                    summary = excluded.summary,
                     categories = excluded.categories,
                     sentiment = excluded.sentiment,
                     suggested_reply = excluded.suggested_reply,
                     is_spam = excluded.is_spam,
                     action_items = excluded.action_items,
                     reply_stances = excluded.reply_stances,
-                    urgency = excluded.urgency,
                     importance_score = excluded.importance_score,
                     ai_status = excluded.ai_status,
                     processing_progress = excluded.processing_progress,
@@ -567,18 +587,13 @@ class ClawDB:
                     updated_at = excluded.updated_at""",
                 (
                     meta.email_id,
-                    json.dumps(meta.keywords) if meta.keywords else None,
-                    meta.summary_one_line,
-                    meta.summary_brief,
-                    json.dumps(meta.summary_key_points) if meta.summary_key_points else None,
-                    json.dumps(meta.outline) if meta.outline else None,
+                    json.dumps(meta.summary, ensure_ascii=False) if meta.summary else None,
                     json.dumps(meta.categories, ensure_ascii=False) if meta.categories else None,
                     meta.sentiment,
                     meta.suggested_reply,
                     (1 if meta.is_spam else 0) if meta.is_spam is not None else None,
                     json.dumps(meta.action_items, ensure_ascii=False) if meta.action_items else None,
                     json.dumps(meta.reply_stances, ensure_ascii=False) if meta.reply_stances else None,
-                    meta.urgency,
                     meta.importance_score,
                     meta.ai_status,
                     meta.processing_progress,
@@ -658,6 +673,97 @@ class ClawDB:
             if line.strip():
                 count += 1
         return count
+
+    def record_email_generation_feedback(
+        self,
+        email_id: str,
+        source: str,
+        subject: str,
+        ai_draft: str,
+        user_final: str,
+        similarity_ratio: float,
+        stance: str | None = None,
+        tone: str | None = None,
+        outline: str | None = None,
+        keywords: list | None = None,
+        one_line: str | None = None,
+    ) -> None:
+        """记录邮件生成（reply_draft / generate_email）隐式反馈到 JSONL。
+        同一封邮件只保留最后一次记录（按 email_id 去重）。"""
+        feedback_file = self.data_dir / "feedback" / "feedback_email_generation.jsonl"
+        existing: list[str] = []
+        if feedback_file.exists():
+            for line in feedback_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if obj.get("email_id") != email_id:
+                        existing.append(line)
+                except json.JSONDecodeError:
+                    existing.append(line)
+        record: dict = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "email_id": email_id,
+            "source": source,
+            "subject": subject,
+        }
+        if source == "reply_draft":
+            if keywords is not None:
+                record["keywords"] = keywords
+            if one_line is not None:
+                record["one_line"] = one_line
+            if stance:
+                record["stance"] = stance
+        elif source == "generate_email":
+            if outline:
+                record["outline"] = outline
+        if tone:
+            record["tone"] = tone
+        record["ai_draft"] = ai_draft
+        record["user_final"] = user_final
+        record["similarity_ratio"] = round(similarity_ratio, 4)
+        existing.append(json.dumps(record, ensure_ascii=False))
+        feedback_file.write_text("\n".join(existing) + "\n", encoding="utf-8")
+
+    def record_polish_email_feedback(
+        self,
+        email_id: str,
+        subject: str,
+        tone: str,
+        original_body: str,
+        polished_body: str,
+        user_final: str,
+        similarity_ratio: float,
+    ) -> None:
+        """记录邮件润色隐式反馈到 JSONL。
+        同一封邮件多次润色只保留最后一次（按 email_id 去重）。"""
+        feedback_file = self.data_dir / "feedback" / "feedback_polish_email.jsonl"
+        existing: list[str] = []
+        if feedback_file.exists():
+            for line in feedback_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if obj.get("email_id") != email_id:
+                        existing.append(line)
+                except json.JSONDecodeError:
+                    existing.append(line)
+        record = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "email_id": email_id,
+            "subject": subject,
+            "tone": tone,
+            "original_body": original_body,
+            "polished_body": polished_body,
+            "user_final": user_final,
+            "similarity_ratio": round(similarity_ratio, 4),
+        }
+        existing.append(json.dumps(record, ensure_ascii=False))
+        feedback_file.write_text("\n".join(existing) + "\n", encoding="utf-8")
 
     # --------------------------------------------------------
     # tasks
@@ -807,9 +913,9 @@ class ClawDB:
                 f"""SELECT e.* FROM emails e
                    JOIN email_ai_metadata m ON e.id = m.email_id
                    WHERE {where}
-                     AND (m.keywords LIKE ? OR m.summary_one_line LIKE ?)
+                     AND m.summary LIKE ?
                    ORDER BY e.received_at DESC LIMIT ?""",
-                f_params + [like, like, limit],
+                f_params + [like, limit],
             ).fetchall()
 
         seen: set = set()
@@ -1004,28 +1110,44 @@ class ClawDB:
 
     def delete_all_emails(self, account_id: Optional[str] = None) -> int:
         """
-        删除本地所有邮件（含级联的 ai_metadata、attachments 记录），
+        删除本地所有邮件（含级联的 ai_metadata、attachments 记录和附件文件），
         同时重置关联账户的 sync_cursor，使下次同步从头拉取。
         返回删除的邮件条数。
         """
         with self.get_conn() as conn:
+            # 1. First, get all email IDs to delete their attachment files
             if account_id:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM emails WHERE account_id = ?", (account_id,)
-                ).fetchone()[0]
+                email_ids = [
+                    row[0] for row in conn.execute(
+                        "SELECT id FROM emails WHERE account_id = ?", (account_id,)
+                    ).fetchall()
+                ]
+                count = len(email_ids)
+            else:
+                email_ids = [
+                    row[0] for row in conn.execute("SELECT id FROM emails").fetchall()
+                ]
+                count = len(email_ids)
+
+            # 2. Delete attachment files for all emails
+            for email_id in email_ids:
+                self._delete_attachment_files(email_id)
+
+            # 3. Then delete database records
+            if account_id:
                 conn.execute("DELETE FROM emails WHERE account_id = ?", (account_id,))
                 conn.execute(
                     "UPDATE accounts SET sync_cursor = NULL, updated_at = ? WHERE id = ?",
                     (datetime.utcnow().isoformat(), account_id),
                 )
             else:
-                count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
                 conn.execute("DELETE FROM emails")
                 conn.execute(
                     "UPDATE accounts SET sync_cursor = NULL, updated_at = ?",
                     (datetime.utcnow().isoformat(),),
                 )
             conn.commit()
+
         return count
 
     def update_email_flag(self, email_id: str, flagged: bool) -> None:
@@ -1046,8 +1168,37 @@ class ClawDB:
             )
             conn.commit()
 
+    def _delete_attachment_files(self, email_id: str) -> None:
+        """
+        删除邮件的附件文件目录。
+        如果目录不存在或删除失败，仅记录警告，不影响数据库删除。
+        """
+        if not self.data_dir:
+            return
+
+        import shutil
+        from pathlib import Path
+
+        att_dir = Path(self.data_dir) / "attachments" / email_id
+
+        if not att_dir.exists():
+            # 目录不存在，可能从未有附件或已被清理
+            return
+
+        try:
+            shutil.rmtree(att_dir)
+            print(f"[Cleanup] Deleted attachment directory: {email_id}")
+        except PermissionError as e:
+            print(f"[Warning] Permission denied deleting attachments for {email_id}: {e}")
+        except Exception as e:
+            print(f"[Warning] Failed to delete attachments for {email_id}: {e}")
+
     def delete_email(self, email_id: str) -> None:
-        """删除单封邮件及其关联的 AI 元数据和附件记录。"""
+        """删除单封邮件及其关联的 AI 元数据、附件记录和附件文件。"""
+        # 1. Delete attachment files from disk FIRST
+        self._delete_attachment_files(email_id)
+
+        # 2. Then delete database records
         with self.get_conn() as conn:
             conn.execute("DELETE FROM email_ai_metadata WHERE email_id = ?", (email_id,))
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email_id,))
@@ -1086,8 +1237,7 @@ class ClawDB:
         if not row:
             return None
         d = dict(row)
-        for json_field in ("keywords", "summary_key_points", "outline",
-                          "categories", "action_items", "reply_stances"):
+        for json_field in ("summary", "categories", "action_items", "reply_stances"):
             if d.get(json_field):
                 try:
                     d[json_field] = json.loads(d[json_field])
@@ -1182,42 +1332,6 @@ class ClawDB:
             except (json.JSONDecodeError, TypeError):
                 pass
         return sorted(category_set)
-
-    def get_emails_by_urgency(
-        self, account_id: str, urgency: str, limit: int = 100
-    ) -> List["Email"]:
-        """按 AI 紧急度（high/medium/low）筛选收件箱邮件。"""
-        with self.get_conn() as conn:
-            rows = conn.execute(
-                """SELECT e.* FROM emails e
-                   JOIN email_ai_metadata m ON e.id = m.email_id
-                   WHERE e.account_id = ? AND m.urgency = ?
-                     AND e.folder = 'INBOX'
-                   ORDER BY e.pinned DESC, e.received_at DESC
-                   LIMIT ?""",
-                (account_id, urgency, limit),
-            ).fetchall()
-        result = []
-        for row in rows:
-            try:
-                result.append(self._row_to_email(row))
-            except Exception:
-                pass
-        return result
-
-    def get_urgency_counts(self, account_id: str) -> Dict[str, int]:
-        """返回收件箱中各紧急度级别的邮件数量，格式：{'high': N, 'medium': N, 'low': N}。"""
-        with self.get_conn() as conn:
-            rows = conn.execute(
-                """SELECT m.urgency, COUNT(*) FROM emails e
-                   JOIN email_ai_metadata m ON e.id = m.email_id
-                   WHERE e.account_id = ?
-                     AND m.urgency IS NOT NULL
-                     AND e.folder = 'INBOX'
-                   GROUP BY m.urgency""",
-                (account_id,),
-            ).fetchall()
-        return {row[0]: row[1] for row in rows}
 
     def update_draft(self, draft_id: str, to_addresses, cc_addresses,
                      subject: str, body_text: str, body_html) -> None:
