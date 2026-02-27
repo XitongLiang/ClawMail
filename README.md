@@ -52,239 +52,227 @@
 - Auto-refresh every 2 minutes; snoozed tasks wake up automatically
 
 ### AI Chat Assistant — Multi-Agent System
-ClawMail features a **6-agent AI system** that adapts to your needs. Each agent is a specialized AI personality that understands different aspects of email management and personal productivity. Switch between agents in Settings → AI Assistant to access different capabilities.
+ClawMail features a **6-agent routing system** that connects you to specialized AI assistants in OpenClaw. Each agent has a unique ID and expertise area. Switch between agents in Settings → AI Assistant to access different capabilities.
 
 #### Available Agents
 
-| Agent | Purpose | Context-Aware |
-|---|---|---|
-| **通用对话** (userAgent001) | General conversation, Q&A, brainstorming | ❌ |
-| **邮件分析** (mailAgent001) | Deep email analysis, extract keywords/action items | ✅ |
-| **个性化助手** (personalizationAgent001) | Learn your preferences, customize AI behavior | ❌ |
-| **回复起草** (draftAgent001) | Draft email replies based on your tone and stance | ✅ |
-| **邮件生成** (generateAgent001) | Generate complete emails from outline or topic | ❌ |
-| **文本润色** (polishAgent001) | Polish and refine email text for professionalism | ❌ |
+| Agent | Agent ID | Purpose | Context-Aware |
+|---|---|---|---|
+| **通用对话** | userAgent001 | General conversation, Q&A, brainstorming | ❌ |
+| **邮件分析** | mailAgent001 | Deep email analysis, extract keywords/action items | ✅ |
+| **个性化助手** | personalizationAgent001 | Handles importance score feedback, triggers personalization skills | ❌ |
+| **回复起草** | draftAgent001 | Draft email replies in conversational mode | ✅ |
+| **邮件生成** | generateAgent001 | Generate complete emails from outline or topic | ❌ |
+| **文本润色** | polishAgent001 | Polish and refine email text for professionalism | ❌ |
 
-**Context-aware agents** automatically include the currently selected email in their analysis, so you don't need to copy-paste content.
+**Context-aware agents** automatically attach the currently selected email's metadata (subject, sender, date, body preview) to your chat message, so you don't need to copy-paste content.
 
 #### Chat Features
 - **Dynamic panel title** — shows active agent name (e.g., "🤖 AI 助手 (个性化助手)")
+- **Agent-specific routing** — ClawMail passes the agent ID to OpenClaw via the `user` parameter
 - **Streaming responses** — real-time typing animation
-- **Persistent chat history** — conversations saved locally per session
+- **Conversation logging** — all chats logged to `~/clawmail_data/chat_logs/{agentID}.log`
 - **Quick reconnect** — 🔄 button to re-test AI connection
 - **Settings integration** — switch agents from ⚙ Settings → AI Assistant
 
+#### How Agent Routing Works
+
+```python
+# ClawMail sends:
+POST http://127.0.0.1:18789/v1/chat/completions
+{
+  "model": "kimi-k2.5",
+  "messages": [...],
+  "user": "draftAgent001"  ← Agent ID for OpenClaw routing
+}
+
+# OpenClaw receives agent ID and:
+# - Routes to agent-specific system prompt
+# - Loads agent conversation history (if available)
+# - Applies agent-specific capabilities
+```
+
+Agent conversation histories are logged locally in `~/clawmail_data/chat_logs/` for debugging and analysis.
+
 ---
 
-## 🌟 Personalization System — Your AI Learns Your Preferences
+## 🌟 Personalization System — AI Learns From Your Feedback
 
-ClawMail's **Personalization Agent** (`personalizationAgent001`) is a breakthrough feature that makes your email assistant truly yours. Unlike traditional rule-based systems, this agent learns your preferences through natural conversation and adapts ClawMail's AI behavior to match your workflow.
+ClawMail features an **importance scoring feedback loop** that allows the AI to learn your email priorities over time. Unlike static rule-based systems, ClawMail adapts its importance scoring based on your actual behavior.
 
-### How Personalization Works
+### How It Works
 
-#### 1. Teaching Your Preferences
-Open the AI chat panel and switch to **个性化助手 (Personalization Agent)** in Settings:
+#### 1. AI Importance Scoring (0-100)
 
+Every email receives an importance score from the AI:
+
+- **90-100**: Extremely important, requires immediate action (urgent tasks, leadership directives, critical deadlines)
+- **70-89**: Important, needs prompt attention (project updates, meeting scheduling, client requests)
+- **40-69**: Moderately important (routine communication, information sync, general notifications)
+- **20-39**: Low importance (subscription content, bulk notifications)
+- **0-19**: Not important (ads, promotions, spam)
+
+The scoring criteria is stored in `~/clawmail_data/prompts/importance_score.txt` and can be dynamically updated by OpenClaw.
+
+#### 2. User Feedback — Two Ways
+
+**Method 1: Manual Score Input**
+- Click the edit button next to the importance score (e.g., "(75)")
+- Enter a new score from 0-100
+
+**Method 2: Drag-to-Reorder** (when importance sorting is enabled)
+- Drag emails to reorder them in the list
+- Between two emails: new score = average of neighboring scores
+- To the top: new score = first email's score + 5 (max 100)
+- To the bottom: new score = last email's score - 5 (min 0)
+
+Both methods immediately update the database and refresh the email list.
+
+#### 3. Feedback Logging
+
+Every score modification is logged to `~/clawmail_data/feedback/feedback_importance_score.jsonl`:
+
+```json
+{
+  "timestamp": "2026-02-27T14:30:00",
+  "email_id": "uuid-xxx",
+  "subject": "Project Deadline Reminder",
+  "keywords": ["project", "deadline"],
+  "one_line": "Reminder: Q1 report due Friday",
+  "brief": "Manager reminds team to submit Q1 progress reports by Friday EOD.",
+  "key_points": ["Q1 report", "Friday deadline"],
+  "original_score": 45,
+  "new_score": 78,
+  "mode": "manual_input",
+  "context": null
+}
 ```
-You: "I want meeting invitations to be marked as urgent"
-AI: "Understood! I'll prioritize emails with calendar invites or meeting-related keywords..."
 
-You: "Emails from my boss (boss@company.com) should always be high priority"
-AI: "Got it! I'll treat all emails from boss@company.com as urgent..."
+For drag-to-reorder, `context` includes the subject, keywords, summaries, and scores of neighboring emails.
 
-You: "I prefer formal tone when replying to external clients"
-AI: "I'll remember to use formal language for external recipients..."
-```
-
-#### 2. ClawMail ↔ OpenClaw Collaboration Workflow
+#### 4. ClawMail ↔ OpenClaw Personalization Loop
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         ClawMail (Client)                       │
+│                      ClawMail (Client)                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  1. User switches to personalizationAgent001                   │
-│  2. User teaches preferences via chat:                         │
-│     "I want weekly reports to be auto-archived"                │
+│  User modifies importance score (manual or drag)                │
+│         ↓                                                       │
+│  Update database + log to feedback_importance_score.jsonl      │
+│         ↓                                                       │
+│  Check: feedback count ≥ 5?                                    │
+│         ↓ Yes                                                   │
+│  Trigger personalization via personalizationAgent001:          │
 │                                                                 │
-│  3. ClawMail routes to OpenClaw:                               │
-│     POST http://127.0.0.1:18789/v1/chat/completions            │
-│     {                                                           │
-│       "model": "kimi-k2.5",                                     │
-│       "messages": [                                             │
-│         { "role": "system", "content": "You are personali..." },│
-│         { "role": "user", "content": "I want weekly repor..." } │
-│       ],                                                        │
-│       "user": "personalizationAgent001"  ← Agent routing       │
-│     }                                                           │
+│  POST http://127.0.0.1:18789/v1/chat/completions                │
+│  {                                                              │
+│    "user": "personalizationAgent001",                          │
+│    "messages": [{                                               │
+│      "content": "(ClawMail-Personalization) 用户已累积...      │
+│        feedback_type: importance_score                          │
+│        feedback_path: ~/clawmail_data/feedback/...jsonl        │
+│        prompt_path: ~/clawmail_data/prompts/importance..."      │
+│    }]                                                           │
+│  }                                                              │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
-                              │ HTTP/JSON
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    OpenClaw (Local AI Gateway)                  │
-│                      http://127.0.0.1:18789                     │
+│                 OpenClaw (Local AI Gateway)                     │
+│                   http://127.0.0.1:18789                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  4. OpenClaw receives request, identifies agent:                │
-│     - Extracts "user": "personalizationAgent001"               │
-│     - Loads agent-specific memory & system prompt              │
-│     - Applies personalization rules from previous chats        │
-│                                                                 │
-│  5. Routes to Kimi K2.5 with agent context:                    │
-│     - Includes user's historical preferences                   │
-│     - Maintains agent conversation memory                      │
-│     - Applies learned customization rules                      │
-│                                                                 │
-│  6. Kimi K2.5 processes with personalization context:          │
-│     - Understands "weekly reports" pattern                     │
-│     - Remembers user's archive preference                      │
-│     - Generates response with personalized rules               │
-│                                                                 │
-│  7. OpenClaw stores new preference in agent memory:             │
-│     Preference DB (~/openclaw_data/agents/)                    │
-│     ├── personalizationAgent001/                               │
-│     │   ├── preferences.json                                   │
-│     │   │   {                                                   │
-│     │   │     "email_rules": [                                  │
-│     │   │       {                                               │
-│     │   │         "pattern": "weekly report",                   │
-│     │   │         "action": "auto-archive",                     │
-│     │   │         "priority": "low"                             │
-│     │   │       }                                               │
-│     │   │     ],                                                │
-│     │   │     "sender_preferences": {                           │
-│     │   │       "boss@company.com": "urgent"                    │
-│     │   │     }                                                 │
-│     │   │   }                                                   │
-│     │   └── chat_history.jsonl                                 │
-│     │                                                           │
-│     ├── mailAgent001/                                          │
-│     ├── draftAgent001/                                         │
-│     └── ...                                                     │
+│  Receives trigger → routes to clawmail-personalization skill   │
+│         ↓                                                       │
+│  Skill execution:                                               │
+│    1. GET /personalization/feedback/importance_score            │
+│       ← Read 5 feedback entries from ClawMail API               │
+│    2. GET /personalization/prompt/importance_score              │
+│       ← Read current scoring criteria                           │
+│    3. Load user profile from OpenClaw memory                    │
+│    4. Analyze patterns via Kimi K2.5:                           │
+│       "User consistently boosts meeting-related emails..."      │
+│       "User downgrades subscription newsletters..."             │
+│    5. Generate personalized importance_score.txt                │
+│    6. POST /personalization/update-prompt                       │
+│       → Backup old prompt to archive/, write new version        │
+│    7. POST /personalization/archive-feedback                    │
+│       → Archive consumed feedback, clear main file              │
+│    8. POST /personalization/status                              │
+│       → Notify ClawMail: "✅ Importance scoring updated"        │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
-                              │ Streaming response
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                         ClawMail (Client)                       │
+│                      ClawMail (Client)                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  8. ClawMail displays AI response:                             │
-│     "✓ Preference saved! Weekly reports will be archived..."   │
-│                                                                 │
-│  9. Future emails benefit automatically:                        │
-│     - mailAgent001 analyzes new "Weekly Report" email          │
-│     - OpenClaw loads personalizationAgent001 preferences       │
-│     - Applies learned rules: category=notification, low urgency│
-│     - ClawMail UI reflects personalized classification         │
+│  Display status: "✅ 个性化更新完成"                             │
+│         ↓                                                       │
+│  Next email AI analysis loads updated prompt                    │
+│         ↓                                                       │
+│  Importance scores now match user preferences!                  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 3. Agent Specialization & Memory Isolation
+#### 5. Automatic Prompt Evolution
 
-Each of the 6 agents maintains its own conversation memory and context in OpenClaw:
-
-- **mailAgent001** — Remembers your email analysis patterns and keyword preferences
-- **personalizationAgent001** — Stores all learned preferences and customization rules
-- **draftAgent001** — Learns your writing style, tone preferences, and common reply templates
-- **generateAgent001** — Remembers your email structure preferences and common topics
-- **polishAgent001** — Adapts to your preferred formality level and writing style
-- **userAgent001** — General conversation history for Q&A and brainstorming
-
-When you chat with `personalizationAgent001`, those preferences are **automatically applied** to all other agents' behavior:
+The scoring criteria in `~/clawmail_data/prompts/importance_score.txt` evolves based on your feedback:
 
 ```
-You (to personalizationAgent001): "I prefer concise summaries, max 20 words"
-→ OpenClaw saves to preference DB
+Initial AI scoring:
+"Meeting emails: 60 points (moderately important)"
 
-Later, when mailAgent001 processes a new email:
-→ OpenClaw loads personalizationAgent001 preferences
-→ AI summary respects your 20-word limit
-→ All future summaries are automatically concise
+After 5 feedback entries showing you boost meeting emails to 85+:
+
+Updated AI scoring:
+"Meeting emails: 80 points (important, requires prompt attention)"
 ```
 
-#### 4. Cross-Agent Preference Sharing
+Old prompts are archived to `~/clawmail_data/prompts/archive/` for version tracking.
+
+### Data Storage
 
 ```
-User Preference Layer (shared across all agents)
-       ↓
-┌──────────────────────────────────────────────────┐
-│  personalizationAgent001 → Preference Database   │
-│  - Email priority rules                          │
-│  - Sender importance mappings                    │
-│  - Category preferences                          │
-│  - Tone/style preferences                        │
-│  - Summary length preferences                    │
-└──────────────────────────────────────────────────┘
-       ↓                    ↓                    ↓
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ mailAgent001 │  │ draftAgent001│  │ generateAgent│
-│ (Analysis)   │  │ (Replies)    │  │ (Compose)    │
-│              │  │              │  │              │
-│ Applies your │  │ Uses your    │  │ Follows your │
-│ urgency rules│  │ tone prefs   │  │ style guide  │
-└──────────────┘  └──────────────┘  └──────────────┘
+~/clawmail_data/
+├── chat_logs/                              ← AI conversation logs (per agent)
+│   ├── mailAgent001.log
+│   ├── personalizationAgent001.log
+│   └── ...
+├── feedback/
+│   ├── feedback_importance_score.jsonl      ← Active feedback (email_id deduplicated)
+│   └── importance_score/
+│       └── 2026-02-27T14-30-00.jsonl        ← Archived after OpenClaw consumes
+├── prompts/
+│   ├── importance_score.txt                 ← Current scoring criteria
+│   └── archive/
+│       └── importance_score_2026-02-27.txt  ← Old versions
+└── clawmail.db
 ```
 
-### Example Personalization Conversations
+### ClawMail REST API for OpenClaw Skills
 
-#### Teaching Email Priority Rules
-```
-You: "Treat emails with '发票' (invoice) in the subject as low priority"
-AI: "✓ Saved! Invoice-related emails will be marked as low urgency."
+ClawMail exposes a local API at `http://127.0.0.1:9999` for OpenClaw skills:
 
-You: "Emails from HR department should be marked for pending reply"
-AI: "✓ Understood! HR emails will be tagged with 🟡 pending reply."
-```
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/personalization/feedback/{type}` | GET | Read feedback data (JSON array) |
+| `/personalization/prompt/{type}` | GET | Read current prompt content |
+| `/personalization/update-prompt` | POST | Backup old prompt + write new version |
+| `/personalization/archive-feedback` | POST | Archive consumed feedback + clear main file |
+| `/personalization/status` | POST | Notify UI of skill completion |
 
-#### Customizing AI Summaries
-```
-You: "Make summaries more detailed, include sender's key points"
-AI: "✓ I'll provide richer summaries with sender context going forward."
+### Benefits
 
-You: "For meeting invites, always extract time and location in the summary"
-AI: "✓ Meeting summaries will now highlight time/location info prominently."
-```
-
-#### Adapting Reply Tone
-```
-You: "When replying to clients, use formal language and include 'Best regards'"
-AI: "✓ I'll maintain professional tone for external replies."
-
-You: "For team members, keep replies casual and friendly"
-AI: "✓ Internal emails will have a relaxed, conversational tone."
-```
-
-### Benefits of Personalization
-
-✅ **Zero manual rules** — just talk to the AI like a human assistant
-✅ **Persistent learning** — preferences saved permanently in OpenClaw
-✅ **Cross-agent consistency** — your preferences apply to all 6 agents
-✅ **Privacy-first** — all preference data stays on your machine
-✅ **Evolving intelligence** — agents get smarter with every conversation
-✅ **Natural language interface** — no complicated config files or regex
-
-### Technical Architecture
-
-The personalization system is built on three key components:
-
-1. **Agent Registry** (`clawmail/infrastructure/ai/agent_registry.py`)
-   - Defines all 6 agents with metadata (ID, name, description, capabilities)
-   - Routes chat messages to the correct OpenClaw agent endpoint
-
-2. **OpenClaw Agent Memory** (server-side, `~/openclaw_data/`)
-   - Per-agent conversation history and preference storage
-   - Shared preference layer accessed by all agents
-   - Persistent across ClawMail restarts
-
-3. **Dynamic Routing** (`clawmail/ui/app.py`)
-   - Context-aware agents automatically attach current email
-   - Agent ID passed to OpenClaw for memory/preference lookup
-   - Seamless switching between 6 specialized personalities
+✅ **Learns from behavior** — no manual rule configuration needed
+✅ **Continuous adaptation** — AI improves with every 5 feedback entries
+✅ **Privacy-first** — all data stays local (ClawMail + OpenClaw)
+✅ **Transparent evolution** — old prompts archived for comparison
+✅ **Cross-session persistence** — learned preferences survive app restarts
 
 ---
 
@@ -454,32 +442,32 @@ User sends message in chat panel
     ▼
 _send_message_async()
     │  If context-aware agent + email selected:
-    │    → _build_email_context() → attach email metadata
+    │    → _build_email_context() → attach email metadata (subject, sender, body preview)
     │  Agent ID routing:
-    │    → mailAgent001: process_email()
-    │    → all others: user_chat(message, agent_id)
+    │    → mailAgent001: process_email(prompt)
+    │    → all others: user_chat(prompt, agent_id)
     ▼
 OpenClawBridge → POST /v1/chat/completions
-    │  Headers: { "user": "personalizationAgent001" }
-    │  OpenClaw routes to agent-specific memory & preferences
+    │  Payload: { "user": "draftAgent001", "messages": [...] }
+    │  Agent ID passed for OpenClaw-side routing
     ▼
-OpenClaw (local) → Agent Memory Lookup
-    │  Loads ~/openclaw_data/agents/{agent_id}/
-    │    - preferences.json (if personalization agent)
-    │    - chat_history.jsonl (conversation context)
-    │  Applies learned rules to prompt
+OpenClaw (local) → Routes to agent endpoint
+    │  OpenClaw may maintain agent-specific:
+    │    - System prompts
+    │    - Conversation history
+    │    - Skills and capabilities
+    │  (Implementation depends on OpenClaw server)
     ▼
 Kimi K2.5 response (streaming)
-    │  Personalized based on agent memory
+    │  Agent-specific behavior
     ▼
 ClawMailApp._append_ai_message()
     │  Real-time typing animation
     │  Response displayed in chat panel
     ▼
-OpenClaw updates agent memory
-    │  New preferences saved (if personalizationAgent001)
-    │  Chat history appended
-    │  Preferences propagated to other agents
+OpenClawBridge.log_chat()
+    │  Appends to ~/clawmail_data/chat_logs/{agent_id}.log
+    │  Format: timestamp + ClawMail message + OpenClaw response
 ```
 
 ### Async Model
