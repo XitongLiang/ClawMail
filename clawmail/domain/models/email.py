@@ -76,6 +76,7 @@ class EmailAIMetadata:
     is_spam: Optional[bool] = None            # AI 判断是否为垃圾邮件
     action_items: Optional[List[Dict]] = None  # AI 提取的行动项（来自 Prompt #1）
     reply_stances: Optional[List[str]] = None  # AI 预生成的 2-4 个回复立场选项
+    importance_score: Optional[int] = None       # 0-100，AI 评估的邮件重要性
 
     # 处理状态（规范值见 enums.EmailAIStatus）
     ai_status: str = "unprocessed"

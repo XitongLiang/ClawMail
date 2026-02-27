@@ -88,7 +88,7 @@ def main():
         _p.end()
         app.setWindowIcon(QIcon(_px))
 
-    ai_bridge = OpenClawBridge(token=_load_openclaw_token(data_dir))
+    ai_bridge = OpenClawBridge(token=_load_openclaw_token(data_dir), log_dir=data_dir / "chat_logs")
 
     window = ClawMailApp(db, cred_manager)
     window.set_ai_bridge(ai_bridge)

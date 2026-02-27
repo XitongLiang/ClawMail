@@ -142,6 +142,9 @@ ClawMail 核心架构
                     └─────────────────────┘
 
 
+### 个性化反馈闭环（OpenClaw skill 触发）
+
+用户修改邮件重要性评分后，ClawMail 记录到 `~/clawmail_data/feedback/feedback_importance_score.jsonl`。当记录数达到 5 条时，自动向 OpenClaw 发送消息触发 `clawmail-personalization` skill，该 skill 读取反馈 + 当前 prompt + 用户侧写，由大模型生成个性化评分标准，更新 `prompts/importance_score.txt` 并归档旧数据。详见 `PersonalizationPlan.md`。
 
 
 

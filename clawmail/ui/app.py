@@ -86,7 +86,12 @@ class EmailListDelegate(QStyledItemDelegate):
         "subscription":  "订阅",
     }
 
+    _SEP_H = 28  # 分隔符行高
+
     def sizeHint(self, option, index):
+        # 分隔符 item
+        if index.data(Qt.ItemDataRole.UserRole) == "__separator__":
+            return QSize(option.rect.width(), self._SEP_H)
         ai_one_line = index.data(Qt.ItemDataRole.UserRole + 8) or ""
         categories  = index.data(Qt.ItemDataRole.UserRole + 9) or []
         has_summary  = bool(ai_one_line)
@@ -100,6 +105,32 @@ class EmailListDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         painter.save()
+
+        # ---- 分隔符 ----
+        if index.data(Qt.ItemDataRole.UserRole) == "__separator__":
+            painter.fillRect(option.rect, option.palette.base())
+            _theme = get_theme()
+            line_color = _theme.dim_color()
+            line_color.setAlpha(80)
+            label = "已完成"
+            f_sep = QFont(option.font)
+            f_sep.setBold(False)
+            pt = f_sep.pointSize()
+            if pt > 0:
+                f_sep.setPointSize(max(pt - 1, 8))
+            painter.setFont(f_sep)
+            from PyQt6.QtGui import QFontMetrics
+            fm = QFontMetrics(f_sep)
+            text_w = fm.horizontalAdvance(label)
+            cx = option.rect.center().x()
+            cy = option.rect.center().y()
+            gap = 6
+            painter.setPen(line_color)
+            painter.drawLine(option.rect.x() + 12, cy, cx - text_w // 2 - gap, cy)
+            painter.drawLine(cx + text_w // 2 + gap, cy, option.rect.right() - 12, cy)
+            painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, label)
+            painter.restore()
+            return
 
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_unread   = index.data(Qt.ItemDataRole.UserRole + 4) or False
@@ -133,6 +164,13 @@ class EmailListDelegate(QStyledItemDelegate):
         ai_one_line  = index.data(Qt.ItemDataRole.UserRole + 8) or ""
         categories   = index.data(Qt.ItemDataRole.UserRole + 9) or []
         ai_failed    = index.data(Qt.ItemDataRole.UserRole + 10) or False
+        folder_name  = index.data(Qt.ItemDataRole.UserRole + 11) or ""
+        is_completed = index.data(Qt.ItemDataRole.UserRole + 13) or False
+
+        # 已完成邮件：文字整体变淡
+        if is_completed and not is_selected:
+            fg.setAlpha(120)
+            dim.setAlpha(90)
 
         _prefix = "📌 " if is_pinned else ("🚩 " if is_flagged else "")
         if ai_failed:
@@ -140,6 +178,12 @@ class EmailListDelegate(QStyledItemDelegate):
         sender   = _prefix + (index.data(Qt.ItemDataRole.UserRole + 1) or "")
         subject  = index.data(Qt.ItemDataRole.UserRole + 2) or ""
         time_str = index.data(Qt.ItemDataRole.UserRole + 3) or ""
+
+        # 搜索模式下在时间前标注邮件所在文件夹
+        _list_widget = self.parent()
+        _in_search = getattr(_list_widget, "_search_active_flag", False)
+        if _in_search and folder_name:
+            time_str = f"[{folder_name}]  {time_str}"
 
         if is_draft and not is_selected:
             fg  = _theme.draft_fg()
@@ -256,8 +300,9 @@ class _EmailWebPage(QWebEnginePage):
     """拦截邮件中的链接点击，改为在系统浏览器中打开，防止在视图内部跳转。
     clawmail-todo:// 协议链接不打开浏览器，改为发射 todo_link_clicked 信号。"""
 
-    todo_link_clicked   = pyqtSignal(str)  # 发射 clawmail-todo:// 完整 URL
-    action_link_clicked = pyqtSignal(str)  # 发射 clawmail-action:// host（reply/reply-all/forward）
+    todo_link_clicked       = pyqtSignal(str)  # 发射 clawmail-todo:// 完整 URL
+    action_link_clicked     = pyqtSignal(str)  # 发射 clawmail-action:// host（reply/reply-all/forward）
+    importance_edit_clicked  = pyqtSignal(str)  # 发射 clawmail-importance://edit?... 完整 URL
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
         if nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
@@ -266,6 +311,9 @@ class _EmailWebPage(QWebEnginePage):
                 return False
             if url.scheme() == "clawmail-action":
                 self.action_link_clicked.emit(url.host())
+                return False
+            if url.scheme() == "clawmail-importance":
+                self.importance_edit_clicked.emit(url.toString())
                 return False
             QDesktopServices.openUrl(url)
             return False  # 阻止在 WebView 内部跳转
@@ -353,8 +401,10 @@ class ClawMailApp(QMainWindow):
         self._sync_service = None
         self._ai_service = None
         self._ai_bridge = None
-        self._ai_processing_count = 0
+        self._ai_processing_total = 0   # 当前批次总邮件数
+        self._ai_processing_done = 0    # 当前批次已完成数
         self._current_folder = "INBOX"
+        self._sort_by_importance: bool = False
         self._current_category: Optional[str] = None  # AI 分类筛选
         self._current_urgency: Optional[str] = None   # AI 紧急度筛选
         self._current_account_id: Optional[str] = None
@@ -383,7 +433,19 @@ class ClawMailApp(QMainWindow):
         self._feedback_meta = None
         self._account_btn = None  # account switcher button in toolbar
         self._init_ui()
-        self._ai_chat_mode = self._load_config().get("ai_chat_mode", "user_chat")
+
+        # Load and validate AI chat mode configuration
+        from clawmail.infrastructure.ai.agent_registry import AGENT_REGISTRY
+        config = self._load_config()
+        mode = config.get("ai_chat_mode", "user_chat")
+
+        # Validate mode exists in registry
+        if mode not in AGENT_REGISTRY:
+            print(f"[Config] Unknown chat mode '{mode}', falling back to user_chat")
+            mode = "user_chat"
+            self._save_config({"ai_chat_mode": mode})
+
+        self._ai_chat_mode = mode
 
     # ----------------------------------------------------------------
     # UI 初始化
@@ -470,6 +532,7 @@ class ClawMailApp(QMainWindow):
 
         # Left2：邮件列表
         self._email_list = QListWidget()
+        self._email_list._search_active_flag = False
         self._email_list.setStyleSheet("background:palette(base); border:none;")
         self._email_list.setItemDelegate(EmailListDelegate(self._email_list))
         _email_panel = QWidget()
@@ -500,7 +563,7 @@ class ClawMailApp(QMainWindow):
         self._search_input.returnPressed.connect(self._on_search_submit)
         _srch_h.addWidget(self._search_input, stretch=1)
         # 确认按钮（空文本，tooltip 提示）
-        _srch_ok = QPushButton()
+        _srch_ok = QPushButton("⏎")
         _srch_ok.setFixedSize(22, 22)
         _srch_ok.setToolTip("搜索  (Enter)")
         _srch_ok.setStyleSheet(
@@ -621,6 +684,28 @@ class ClawMailApp(QMainWindow):
         _fp_vbox.addLayout(_fp_row2)
         _ep_vbox.addWidget(self._filter_panel)
 
+        # 重要性排序开关
+        _sort_row = QWidget()
+        _sort_row.setStyleSheet("background:palette(button); border-bottom:1px solid palette(mid);")
+        _sort_h = QHBoxLayout(_sort_row)
+        _sort_h.setContentsMargins(8, 2, 8, 2)
+        _sort_h.setSpacing(6)
+        _sort_h.addStretch()
+        _sort_lbl = QLabel("按重要性排序")
+        _sort_lbl.setStyleSheet("font-size:11px;")
+        _sort_h.addWidget(_sort_lbl)
+        self._importance_sort_toggle = QPushButton("关")
+        self._importance_sort_toggle.setCheckable(True)
+        self._importance_sort_toggle.setFixedSize(32, 18)
+        self._importance_sort_toggle.setStyleSheet(
+            "QPushButton{border:1px solid palette(mid);border-radius:9px;"
+            "background:palette(midlight);font-size:10px;}"
+            "QPushButton:checked{background:#5b86e5;color:#fff;border-color:#5b86e5;}"
+        )
+        self._importance_sort_toggle.toggled.connect(self._on_importance_sort_toggle)
+        _sort_h.addWidget(self._importance_sort_toggle)
+        _ep_vbox.addWidget(_sort_row)
+
         _ep_vbox.addWidget(self._email_list, stretch=1)
         splitter.addWidget(_email_panel)
 
@@ -635,6 +720,7 @@ class ClawMailApp(QMainWindow):
             "<p>选择一封邮件查看内容</p>", QUrl("file:///")
         )
         self._content_view.page().todo_link_clicked.connect(self._on_todo_link_clicked)
+        self._content_view.page().importance_edit_clicked.connect(self._on_importance_edit_clicked)
 
         # 回复工具栏（Qt 按钮，直接调用方法，可靠）
         _content_panel = QWidget()
@@ -746,11 +832,12 @@ class ClawMailApp(QMainWindow):
         _ai_hdr = QHBoxLayout()
         _ai_hdr.setContentsMargins(0, 0, 0, 0)
         _ai_hdr.setSpacing(0)
-        _ai_title = QLabel("🤖 AI 助手")
-        _ai_title.setStyleSheet(
+        self._ai_title = QLabel("🤖 AI 助手")
+        self._ai_title.setStyleSheet(
             "padding:5px 10px; font-weight:bold; font-size:11px; "
             "border-bottom:1px solid palette(mid); background:palette(button);"
         )
+        self._update_agent_indicator()  # Update title with agent name
         _ai_clear_btn = QPushButton("🗑")
         _ai_clear_btn.setToolTip("清除聊天记录")
         _ai_clear_btn.setFixedSize(28, 28)
@@ -769,7 +856,7 @@ class ClawMailApp(QMainWindow):
             "QPushButton:hover{background:palette(midlight);}"
         )
         self._ai_reconnect_btn.clicked.connect(self._on_ai_reconnect)
-        _ai_hdr.addWidget(_ai_title, stretch=1)
+        _ai_hdr.addWidget(self._ai_title, stretch=1)
         _ai_hdr.addWidget(self._ai_reconnect_btn)
         _ai_hdr.addWidget(_ai_clear_btn)
         _ai_hdr_widget = QWidget()
@@ -1079,7 +1166,7 @@ class ClawMailApp(QMainWindow):
         self.set_sync_service(sync_svc, account_id=account_id)
 
         if self._ai_bridge:
-            ai_processor = AIProcessor(self._ai_bridge)
+            ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)
             sync_svc.email_synced.connect(ai_svc.enqueue)
@@ -1133,6 +1220,7 @@ class ClawMailApp(QMainWindow):
         self._current_urgency = None
         # 清除搜索状态
         self._search_active = False
+        self._email_list._search_active_flag = False
         if self._search_clear_btn:
             self._search_clear_btn.setVisible(False)
         if self._search_input:
@@ -1218,6 +1306,7 @@ class ClawMailApp(QMainWindow):
         )
 
         self._search_active = True
+        self._email_list._search_active_flag = True
         self._search_clear_btn.setVisible(True)
 
         # 构建标题摘要
@@ -1247,6 +1336,7 @@ class ClawMailApp(QMainWindow):
 
     def _on_search_clear(self) -> None:
         self._search_active = False
+        self._email_list._search_active_flag = False
         if self._search_clear_btn:
             self._search_clear_btn.setVisible(False)
         if self._search_input:
@@ -1283,6 +1373,24 @@ class ClawMailApp(QMainWindow):
         if hasattr(self, "_filter_flag_combo"):
             self._filter_flag_combo.setCurrentIndex(0)
 
+    def _on_importance_sort_toggle(self, checked: bool) -> None:
+        self._sort_by_importance = checked
+        self._importance_sort_toggle.setText("开" if checked else "关")
+        # 开启/关闭拖拽排序
+        if checked:
+            self._email_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+            self._email_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self._email_list.setAutoScroll(True)
+            self._email_list.setAutoScrollMargin(40)
+            self._email_list.model().rowsMoved.connect(self._on_email_rows_moved)
+        else:
+            self._email_list.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
+            try:
+                self._email_list.model().rowsMoved.disconnect(self._on_email_rows_moved)
+            except (TypeError, RuntimeError):
+                pass
+        self.refresh_email_list(self._current_folder)
+
     def _on_category_changed(self, current: QListWidgetItem, _prev):
         if not current:
             return
@@ -1303,11 +1411,28 @@ class ClawMailApp(QMainWindow):
         self._urgency_list.blockSignals(False)
         self._refresh_email_list_by_category(cat_key)
 
-    @pyqtSlot(str, str)
-    @pyqtSlot(str)
-    def _on_ai_processing_started(self, email_id: str):
-        self._ai_processing_count += 1
-        self._ai_status_label.setText(f"🤖 AI 处理中… ({self._ai_processing_count})")
+    @pyqtSlot(str, int)
+    def _on_ai_processing_started(self, email_id: str, queue_remaining: int):
+        # 获取邮件主题用于显示
+        _subj = ""
+        if self._db:
+            _e = self._db.get_email(email_id)
+            if _e:
+                _subj = (_e.subject or "")[:20]
+        if not _subj:
+            _subj = email_id[:8]
+
+        if not self._ai_status_label.isVisible():
+            # 新批次开始：当前 1 封 + 队列中剩余
+            self._ai_processing_total = 1 + queue_remaining
+            self._ai_processing_done = 0
+        else:
+            # 批次进行中，可能有新邮件入队，更新总数
+            self._ai_processing_total = self._ai_processing_done + 1 + queue_remaining
+        cur = self._ai_processing_done + 1
+        self._ai_status_label.setText(
+            f"🤖 AI正在分析：{_subj}… ({cur}/{self._ai_processing_total})"
+        )
         self._ai_status_label.setVisible(True)
 
     def _on_ai_email_processed(self, email_id: str, ai_status: str):
@@ -1328,21 +1453,22 @@ class ClawMailApp(QMainWindow):
                              ai_status == "failed")
                 self._email_list.viewport().update()
                 break
+        # 若当前正在查看这封邮件，刷新详情区域
+        if self._current_email and self._current_email.id == email_id:
+            self._on_email_selected(self._email_list.currentItem(), None)
         self._refresh_category_list()
         self._refresh_urgency_list()
         self._refresh_todo_list()
         # 更新右下角 AI 处理中指示
-        self._ai_processing_count = max(0, self._ai_processing_count - 1)
-        if self._ai_processing_count > 0:
-            self._ai_status_label.setText(f"🤖 AI 处理中… ({self._ai_processing_count})")
-        else:
+        self._ai_processing_done += 1
+        if self._ai_processing_done >= self._ai_processing_total:
             self._ai_status_label.setVisible(False)
 
     def _on_email_selected(self, current: QListWidgetItem, _prev):
         if not current:
             return
         email_id = current.data(Qt.ItemDataRole.UserRole)
-        if not email_id or not self._db:
+        if not email_id or email_id == "__separator__" or not self._db:
             return
         email = self._db.get_email(email_id)
         if not email:
@@ -1361,6 +1487,11 @@ class ClawMailApp(QMainWindow):
             self._email_list.viewport().update()
         from_info = email.from_address or {}
         from_str = f"{from_info.get('name', '')} <{from_info.get('email', '')}>"
+        to_list = email.to_addresses or []
+        to_str = ", ".join(
+            f"{t.get('name', '')} <{t.get('email', '')}>" if t.get('name') else t.get('email', '')
+            for t in to_list
+        )
         date_str = _to_cst(email.received_at).strftime("%Y-%m-%d %H:%M") if email.received_at else ""
         def _esc(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1384,6 +1515,7 @@ class ClawMailApp(QMainWindow):
             f"padding:10px 14px;border-bottom:1px solid {_th.html_header_border()};'>"
             f"<b>{_esc(email.subject or '')}</b><br>"
             f"发件人：{_esc(from_str)}<br>"
+            f"收件人：{_esc(to_str)}<br>"
             f"时间：{_esc(date_str)}<br>"
             f"{_add_todo_btn}"
             f"</div>"
@@ -1391,41 +1523,45 @@ class ClawMailApp(QMainWindow):
         # AI 摘要面板（brief + key_points + 分类标签）
         ai_panel_html = ""
         if self._db:
-            meta = self._db.get_email_ai_metadata(email_id)
-            if meta and meta.ai_status == "processed":
-                ai_panel_html = self._build_ai_summary_html(meta)
-                # 只对未打过分的邮件显示反馈面板
-                with self._db.get_conn() as _fc:
-                    _fr = _fc.execute(
-                        "SELECT feedback_rating FROM email_ai_metadata WHERE email_id=?",
-                        (email_id,),
-                    ).fetchone()
-                _already_rated = _fr and _fr[0] is not None
-                if _already_rated:
-                    self._feedback_widget.setVisible(False)
+            try:
+                meta = self._db.get_email_ai_metadata(email_id)
+                if meta and meta.ai_status == "processed":
+                    ai_panel_html = self._build_ai_summary_html(meta)
+                    # 只对未打过分的邮件显示反馈面板
+                    with self._db.get_conn() as _fc:
+                        _fr = _fc.execute(
+                            "SELECT feedback_rating FROM email_ai_metadata WHERE email_id=?",
+                            (email_id,),
+                        ).fetchone()
+                    _already_rated = _fr and _fr[0] is not None
+                    if _already_rated:
+                        self._feedback_widget.setVisible(False)
+                    else:
+                        self._feedback_email_id = email_id
+                        self._feedback_meta = meta
+                        self._fb_star_bar.reset()
+                        self._fb_comment_edit.clear()
+                        self._fb_comment_edit.setVisible(False)
+                        self._feedback_widget.setEnabled(True)
+                        self._feedback_widget.setVisible(True)
                 else:
-                    self._feedback_email_id = email_id
-                    self._feedback_meta = meta
-                    self._fb_star_bar.reset()
-                    self._fb_comment_edit.clear()
-                    self._fb_comment_edit.setVisible(False)
-                    self._feedback_widget.setEnabled(True)
-                    self._feedback_widget.setVisible(True)
-            else:
-                self._feedback_widget.setVisible(False)
-                if meta and meta.ai_status == "failed":
-                    err_detail = ""
-                    if meta.processing_error:
-                        err_detail = (
-                            f" <span style='color:#aaa'>({_html_mod.escape(meta.processing_error[:80])})</span>"
+                    self._feedback_widget.setVisible(False)
+                    if meta and meta.ai_status == "failed":
+                        err_detail = ""
+                        if meta.processing_error:
+                            err_detail = (
+                                f" <span style='color:#aaa'>({_html_mod.escape(meta.processing_error[:80])})</span>"
+                            )
+                        _wt = get_theme()
+                        ai_panel_html = (
+                            f"<div style='padding:6px 14px;background:{_wt.html_warning_bg()};"
+                            f"border-bottom:1px solid {_wt.html_warning_border()};"
+                            f"font-size:12px;color:{_wt.html_warning_text()}'>"
+                            f"⚠️ AI 分析失败，将在下次启动时重试{err_detail}</div>"
                         )
-                    _wt = get_theme()
-                    ai_panel_html = (
-                        f"<div style='padding:6px 14px;background:{_wt.html_warning_bg()};"
-                        f"border-bottom:1px solid {_wt.html_warning_border()};"
-                        f"font-size:12px;color:{_wt.html_warning_text()}'>"
-                        f"⚠️ AI 分析失败，将在下次启动时重试{err_detail}</div>"
-                    )
+            except Exception as _ai_err:
+                import traceback; traceback.print_exc()
+                self._feedback_widget.setVisible(False)
         else:
             self._feedback_widget.setVisible(False)
 
@@ -1546,7 +1682,7 @@ class ClawMailApp(QMainWindow):
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,
-                    lambda: self._ai_bridge.user_chat(prompt, "feedbackAgent001"),
+                    lambda: self._ai_bridge.user_chat(prompt, "personalizationAgent001"),
                 )
                 self._append_ai_message(response)
                 self._status_bar.showMessage("✅ 反馈已提交，感谢！", 3000)
@@ -1792,9 +1928,23 @@ class ClawMailApp(QMainWindow):
         form.addRow(ai_chat_section)
 
         mode_combo = QComboBox()
-        mode_combo.addItem("用户对话 (user_chat)", "user_chat")
-        mode_combo.addItem("邮件助手 (mail_chat)", "mail_chat")
-        mode_combo.setCurrentIndex(0 if self._ai_chat_mode == "user_chat" else 1)
+
+        # Import agent registry
+        from clawmail.infrastructure.ai.agent_registry import AGENT_REGISTRY
+
+        # Populate from registry
+        for mode_key, agent_info in AGENT_REGISTRY.items():
+            mode_combo.addItem(agent_info["name"], mode_key)
+
+        # Set tooltips for each item
+        for idx, (mode_key, agent_info) in enumerate(AGENT_REGISTRY.items()):
+            mode_combo.setItemData(idx, agent_info["description"], Qt.ItemDataRole.ToolTipRole)
+
+        # Set current selection
+        mode_keys = list(AGENT_REGISTRY.keys())
+        current_idx = mode_keys.index(self._ai_chat_mode) if self._ai_chat_mode in mode_keys else 0
+        mode_combo.setCurrentIndex(current_idx)
+
         mode_combo.setStyleSheet(
             "border:1px solid palette(mid);border-radius:3px;"
             "background:palette(button);color:palette(button-text);padding:2px 6px;"
@@ -1841,9 +1991,6 @@ class ClawMailApp(QMainWindow):
             for eid in ids:
                 self._ai_service.enqueue(eid)
             dlg.accept()
-            self._status_bar.showMessage(
-                f"已将 {len(ids)} 封收件箱邮件加入 AI 分析队列…", 5000
-            )
 
         ai_inbox_btn.clicked.connect(_on_ai_all_inbox)
         form.addRow(ai_inbox_btn)
@@ -1864,6 +2011,7 @@ class ClawMailApp(QMainWindow):
         if mode_changed:
             self._ai_chat_mode = new_mode
             self._save_config({"ai_chat_mode": new_mode})
+            self._update_agent_indicator()  # Update chat panel indicator
 
         new_token = token_edit.text().strip()
         if not new_token:
@@ -1872,7 +2020,8 @@ class ClawMailApp(QMainWindow):
             return
 
         # 更新 bridge
-        self._ai_bridge = OpenClawBridge(token=new_token)
+        log_dir = self._db.data_dir / "chat_logs" if self._db else None
+        self._ai_bridge = OpenClawBridge(token=new_token, log_dir=log_dir)
 
         # 持久化到 config.json
         self._save_config({"openclaw_token": new_token})
@@ -1957,15 +2106,22 @@ class ClawMailApp(QMainWindow):
         item = self._email_list.itemAt(pos)
         if not item:
             return
-        email_id   = item.data(Qt.ItemDataRole.UserRole)
-        is_unread  = item.data(Qt.ItemDataRole.UserRole + 4) or False
-        is_pinned  = item.data(Qt.ItemDataRole.UserRole + 5) or False
-        is_flagged = item.data(Qt.ItemDataRole.UserRole + 6) or False
+        email_id     = item.data(Qt.ItemDataRole.UserRole)
+        if email_id == "__separator__":
+            return
+        is_unread    = item.data(Qt.ItemDataRole.UserRole + 4) or False
+        is_pinned    = item.data(Qt.ItemDataRole.UserRole + 5) or False
+        is_flagged   = item.data(Qt.ItemDataRole.UserRole + 6) or False
+        is_completed = item.data(Qt.ItemDataRole.UserRole + 13) or False
 
         menu = QMenu(self)
         act_unread = menu.addAction("设为未读") if not is_unread else None
         act_pin    = menu.addAction("取消置顶" if is_pinned else "置顶")
         act_flag   = menu.addAction("🚩 取消旗标" if is_flagged else "🚩 旗标")
+        # 重要性排序模式下显示"已完成"选项
+        act_completed = None
+        if self._sort_by_importance:
+            act_completed = menu.addAction("取消已完成" if is_completed else "✅ 标记已完成")
         menu.addSeparator()
         in_trash = (self._current_folder == "已删除")
         in_draft = (self._current_folder == "草稿箱")
@@ -1986,6 +2142,8 @@ class ClawMailApp(QMainWindow):
             self._ctx_toggle_pin(email_id, is_pinned)
         elif action == act_flag:
             self._ctx_toggle_flag(email_id, is_flagged, item)
+        elif act_completed and action == act_completed:
+            self._ctx_toggle_completed(email_id, is_completed)
         elif act_spam and action == act_spam:
             self._ctx_mark_spam(email_id, item)
         elif act_unspam and action == act_unspam:
@@ -2012,6 +2170,10 @@ class ClawMailApp(QMainWindow):
         self._db.update_email_flag(email_id, new_flagged)
         item.setData(Qt.ItemDataRole.UserRole + 6, new_flagged)
         self._email_list.viewport().update()
+
+    def _ctx_toggle_completed(self, email_id: str, currently_completed: bool):
+        self._db.update_email_completed(email_id, not currently_completed)
+        self.refresh_email_list(self._current_folder)
 
     def _ctx_toggle_pin(self, email_id: str, currently_pinned: bool):
         self._db.update_email_pinned(email_id, not currently_pinned)
@@ -2075,35 +2237,11 @@ class ClawMailApp(QMainWindow):
         self._status_bar.showMessage("已移回收件箱", 3000)
 
     def _ctx_rerun_ai(self, email_id: str) -> None:
-        """对单封邮件手动触发 AI 重新分析。"""
-        if not self._ai_bridge or not self._db:
+        """对单封邮件手动触发 AI 重新分析（统一走 AIService 队列）。"""
+        if not self._ai_service or not self._ai_bridge:
             QMessageBox.information(self, "提示", "AI 服务未连接，请在设置中配置 API Token。")
             return
-        email = self._db.get_email(email_id)
-        if not email:
-            return
-        self._status_bar.showMessage(
-            f"🤖 正在重新分析：{(email.subject or '')[:30]}…", 0
-        )
-        asyncio.ensure_future(self._rerun_ai_async(email))
-
-    async def _rerun_ai_async(self, email) -> None:
-        """异步执行 AI 分析并更新数据库。"""
-        from clawmail.infrastructure.ai.ai_processor import AIProcessor, AIProcessingError
-        loop = asyncio.get_event_loop()
-        processor = AIProcessor(self._ai_bridge)
-        try:
-            meta = await loop.run_in_executor(None, processor.process_email, email)
-            self._db.update_email_ai_metadata(meta)
-            self._on_ai_email_processed(email.id, "processed")
-            # 若当前正在查看这封邮件，刷新详情区域
-            if self._current_email and self._current_email.id == email.id:
-                self._on_email_selected(self._email_list.currentItem(), None)
-            self._status_bar.showMessage(
-                f"✅ AI 分析完成：{(email.subject or '')[:30]}", 3000
-            )
-        except AIProcessingError as e:
-            self._status_bar.showMessage(f"❌ AI 分析失败：{e}", 4000)
+        self._ai_service.enqueue(email_id)
 
     def _on_email_double_clicked(self, item: QListWidgetItem):
         """双击草稿箱中的邮件，打开 ComposeDialog 继续编辑。"""
@@ -2120,7 +2258,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
         # 通过 in_reply_to 字段（存储的是源邮件 DB id）恢复源邮件
         source_email = None
         source_ai_meta = None
@@ -2174,7 +2312,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
 
         dlg = ComposeDialog(self._db, self._cred, accs[0],
                             ai_processor=ai_proc, parent=self)
@@ -2205,7 +2343,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
 
         from_info = email.from_address or {}
         to_addr = from_info.get("email", "")
@@ -2441,11 +2579,30 @@ class ClawMailApp(QMainWindow):
         if not parts:
             return ""
         body = "".join(parts)
+        score_badge = ""
+        if meta.importance_score is not None:
+            try:
+                s = int(meta.importance_score)
+            except (ValueError, TypeError):
+                s = None
+            if s is not None:
+                sc = "#E53935" if s >= 90 else "#FB8C00" if s >= 70 else "#43A047" if s >= 40 else _dim
+                import urllib.parse as _up_score
+                _edit_url = "clawmail-importance://edit?" + _up_score.urlencode({
+                    "email_id": meta.email_id, "score": str(s),
+                })
+                score_badge = (
+                    f" <span style='font-size:11px;color:{sc};font-weight:normal'>"
+                    f"（{s}）</span>"
+                    f" <a href='{_edit_url}' style='font-size:10px;color:{_label};"
+                    f"text-decoration:none;border:1px solid {_border};"
+                    f"border-radius:3px;padding:0 4px;cursor:pointer'>✏️</a>"
+                )
         return (
             f"<div style='padding:10px 14px;background:{_panel};"
             f"border-bottom:1px solid {_border};font-family:sans-serif'>"
             f"<div style='font-size:11px;color:{_label};font-weight:bold;"
-            f"margin-bottom:6px'>🤖 AI 分析</div>"
+            f"margin-bottom:6px'>🤖 AI 分析{score_badge}</div>"
             f"{body}"
             "</div>"
         )
@@ -2520,6 +2677,179 @@ class ClawMailApp(QMainWindow):
             return
         self._refresh_todo_list()
         self._status_bar.showMessage(f"✅ 已加入待办：{task.title[:30]}", 2500)
+
+    # ----------------------------------------------------------------
+    # 重要性评分修改
+    # ----------------------------------------------------------------
+
+    def _on_importance_edit_clicked(self, url_str: str) -> None:
+        """用户点击重要性评分旁的编辑按钮，弹出输入框修改分数。"""
+        import urllib.parse as _up
+        try:
+            parsed = _up.urlparse(url_str)
+            params = dict(_up.parse_qsl(parsed.query))
+        except Exception:
+            return
+        email_id = params.get("email_id")
+        old_score_str = params.get("score", "")
+        if not email_id or not self._db:
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+        new_val, ok = QInputDialog.getInt(
+            self, "修改重要性评分",
+            f"当前评分：{old_score_str}\n请输入新的评分（0-100）：",
+            int(old_score_str) if old_score_str.isdigit() else 50,
+            0, 100,
+        )
+        if not ok:
+            return
+        old_score = int(old_score_str) if old_score_str.isdigit() else 0
+        self._apply_importance_change(email_id, old_score, new_val, "manual_input")
+
+    def _apply_importance_change(
+        self, email_id: str, old_score: int, new_score: int,
+        mode: str, context: dict | None = None,
+    ) -> None:
+        """更新数据库 + 记录反馈 + 刷新视图。"""
+        if not self._db:
+            return
+        # 更新数据库
+        self._db.update_importance_score(email_id, new_score)
+        # 记录反馈
+        email = self._db.get_email(email_id)
+        subject = email.subject if email else ""
+        meta = self._db.get_email_ai_metadata(email_id)
+        ai_summary = {
+            "keywords": meta.keywords if meta else None,
+            "one_line": meta.summary_one_line if meta else None,
+            "brief": meta.summary_brief if meta else None,
+            "key_points": meta.summary_key_points if meta else None,
+        }
+        self._db.record_importance_feedback(
+            email_id=email_id,
+            subject=subject,
+            ai_summary=ai_summary,
+            original_score=old_score,
+            new_score=new_score,
+            mode=mode,
+            context=context,
+        )
+        # 刷新邮件详情视图
+        if self._current_email and self._current_email.id == email_id:
+            self._on_email_selected(self._email_list.currentItem(), None)
+        # 手动输入时刷新列表（拖拽不需要，位置已由用户决定）
+        if mode == "manual_input" and self._sort_by_importance:
+            self.refresh_email_list(self._current_folder)
+        # 检查反馈数量，达到 5 条时触发 OpenClaw 个性化更新
+        count = self._db.get_feedback_count("importance_score")
+        if count >= 5 and self._ai_bridge:
+            self._trigger_personalization("importance_score")
+
+    def _trigger_personalization(self, prompt_type: str) -> None:
+        """反馈累积 ≥5 条，向 OpenClaw 发消息触发 clawmail-personalization skill。
+        触发前先归档当前反馈和 prompt（保险：防止 OpenClaw 绕过 API 直接操作文件）。"""
+        from datetime import datetime as _dt
+        import shutil as _shutil
+        feedback_file = self._db.data_dir / "feedback" / f"feedback_{prompt_type}.jsonl"
+        feedback_archive_dir = self._db.data_dir / "feedback" / prompt_type
+        prompt_file = self._db.data_dir / "prompts" / f"{prompt_type}.txt"
+        prompt_archive_dir_path = self._db.data_dir / "prompts" / "archive"
+
+        # 保险归档：反馈
+        try:
+            if feedback_file.exists() and feedback_file.stat().st_size > 0:
+                feedback_archive_dir.mkdir(exist_ok=True)
+                ts = _dt.now().strftime("%Y-%m-%dT%H-%M-%S")
+                _shutil.copy2(str(feedback_file), str(feedback_archive_dir / f"{ts}.jsonl"))
+        except Exception:
+            pass
+
+        # 保险归档：当前 prompt
+        try:
+            if prompt_file.exists():
+                prompt_archive_dir_path.mkdir(exist_ok=True)
+                date_str = _dt.now().strftime("%Y-%m-%d_%H%M%S")
+                _shutil.copy2(str(prompt_file), str(prompt_archive_dir_path / f"{prompt_type}_{date_str}.txt"))
+        except Exception:
+            pass
+
+        feedback_path = str(feedback_file)
+        prompt_path = str(prompt_file)
+        archive_dir = str(feedback_archive_dir)
+        prompt_archive_dir = str(prompt_archive_dir_path)
+
+        trigger_msg = (
+            f"(ClawMail-Personalization) 用户已累积足够的重要性评分反馈，请触发 clawmail-personalization skill。\n"
+            f"feedback_type: {prompt_type}\n"
+            f"feedback_path: {feedback_path}\n"
+            f"prompt_path: {prompt_path}\n"
+            f"archive_dir: {archive_dir}\n"
+            f"prompt_archive_dir: {prompt_archive_dir}\n"
+        )
+
+        async def _send():
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._ai_bridge.user_chat(trigger_msg, "personalizationAgent001"),
+                )
+            except Exception as e:
+                print(f"[Personalization] 触发失败: {e}")
+
+        asyncio.ensure_future(_send())
+
+    def _on_email_rows_moved(self, _parent, start, _end, _dest, dest_row) -> None:
+        """拖拽排序后，根据上下邻居计算新的 importance_score。"""
+        moved_item = self._email_list.item(dest_row)
+        if not moved_item:
+            return
+        email_id = moved_item.data(Qt.ItemDataRole.UserRole)
+        old_score = moved_item.data(Qt.ItemDataRole.UserRole + 12)
+        if old_score is None:
+            old_score = 0
+
+        count = self._email_list.count()
+        above_item = self._email_list.item(dest_row - 1) if dest_row > 0 else None
+        below_item = self._email_list.item(dest_row + 1) if dest_row < count - 1 else None
+
+        above_score = above_item.data(Qt.ItemDataRole.UserRole + 12) if above_item else None
+        below_score = below_item.data(Qt.ItemDataRole.UserRole + 12) if below_item else None
+
+        def _neighbor_ctx(item):
+            """构建邻居邮件的上下文信息（subject + AI 摘要 + score）。"""
+            eid = item.data(Qt.ItemDataRole.UserRole)
+            d = {"subject": item.data(Qt.ItemDataRole.UserRole + 2) or "",
+                 "score": item.data(Qt.ItemDataRole.UserRole + 12)}
+            if self._db:
+                m = self._db.get_email_ai_metadata(eid)
+                if m:
+                    d["keywords"] = m.keywords
+                    d["one_line"] = m.summary_one_line
+                    d["brief"] = m.summary_brief
+                    d["key_points"] = m.summary_key_points
+            return d
+
+        ctx = {}
+        if above_score is not None and below_score is not None:
+            # 拖到两封邮件之间
+            new_score = (above_score + below_score) // 2
+            ctx = {"above": _neighbor_ctx(above_item), "below": _neighbor_ctx(below_item)}
+        elif above_score is None and below_score is not None:
+            # 拖到最顶部
+            new_score = min(below_score + 5, 100)
+            ctx = {"below": _neighbor_ctx(below_item)}
+        elif above_score is not None and below_score is None:
+            # 拖到最底部
+            new_score = max(above_score - 5, 0)
+            ctx = {"above": _neighbor_ctx(above_item)}
+        else:
+            return  # 列表里只有一封邮件
+
+        new_score = max(0, min(100, new_score))
+        moved_item.setData(Qt.ItemDataRole.UserRole + 12, new_score)
+        self._apply_importance_change(email_id, old_score, new_score, "drag_reorder", ctx)
 
     # ----------------------------------------------------------------
     # 分类栏刷新
@@ -2665,10 +2995,24 @@ class ClawMailApp(QMainWindow):
         self._email_list.clear()
         if not self._db or not self._current_account_id:
             return
-        emails = self._db.get_emails_by_folder(
-            self._current_account_id, folder, limit=100
-        )
+        if self._sort_by_importance:
+            emails = self._db.get_emails_by_folder_sorted_by_importance(
+                self._current_account_id, folder, limit=100
+            )
+        else:
+            emails = self._db.get_emails_by_folder(
+                self._current_account_id, folder, limit=100
+            )
+        separator_added = False
         for email in emails:
+            # 重要性排序模式：在第一封已完成邮件前插入分隔符
+            if (self._sort_by_importance and not separator_added
+                    and email.flag_status == "completed"):
+                sep = QListWidgetItem()
+                sep.setData(Qt.ItemDataRole.UserRole, "__separator__")
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选、不可拖拽
+                self._email_list.addItem(sep)
+                separator_added = True
             self._append_email_item(email)
         self._refresh_folder_counts()
 
@@ -2748,12 +3092,17 @@ class ClawMailApp(QMainWindow):
         ai_one_line = ""
         ai_categories: list = []
         ai_failed = False
+        importance = None
         if self._db:
-            meta = self._db.get_email_ai_metadata(email.id)
-            if meta:
-                ai_one_line = meta.summary_one_line or ""
-                ai_categories = meta.categories or []
-                ai_failed = (meta.ai_status == "failed")
+            try:
+                meta = self._db.get_email_ai_metadata(email.id)
+                if meta:
+                    ai_one_line = meta.summary_one_line or ""
+                    ai_categories = meta.categories or []
+                    ai_failed = (meta.ai_status == "failed")
+                    importance = meta.importance_score
+            except Exception:
+                import traceback; traceback.print_exc()
 
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole,      email.id)
@@ -2767,6 +3116,9 @@ class ClawMailApp(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole + 8,  ai_one_line)
         item.setData(Qt.ItemDataRole.UserRole + 9,  ai_categories)
         item.setData(Qt.ItemDataRole.UserRole + 10, ai_failed)
+        item.setData(Qt.ItemDataRole.UserRole + 11, email.folder or "")
+        item.setData(Qt.ItemDataRole.UserRole + 12, importance)  # importance_score
+        item.setData(Qt.ItemDataRole.UserRole + 13, email.flag_status == "completed")
         return item
 
     def set_current_account(self, account_id: str) -> None:
@@ -2817,7 +3169,7 @@ class ClawMailApp(QMainWindow):
         sync_svc = SyncService(self._db, self._cred)
         self.set_sync_service(sync_svc, account_id=account.id)
 
-        ai_processor = AIProcessor(self._ai_bridge) if self._ai_bridge else None
+        ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None) if self._ai_bridge else None
         if ai_processor:
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)
@@ -3398,6 +3750,35 @@ class ClawMailApp(QMainWindow):
             except Exception:
                 pass
 
+    def _update_agent_indicator(self) -> None:
+        """Update AI panel title to show active agent."""
+        from clawmail.infrastructure.ai.agent_registry import AGENT_REGISTRY
+        agent_info = AGENT_REGISTRY.get(self._ai_chat_mode, {})
+        full_name = agent_info.get('name', '通用对话 (userAgent001)')
+
+        # Extract Chinese name (before the opening bracket)
+        chinese_name = full_name.split(' (')[0] if ' (' in full_name else full_name
+
+        # Update AI title (shows only Chinese name without agent ID)
+        title_text = f"🤖 AI 助手 ({chinese_name})"
+        if hasattr(self, '_ai_title'):
+            self._ai_title.setText(title_text)
+
+    def _build_email_context(self, email) -> str:
+        """Build concise email context for AI prompts."""
+        from_name = email.from_address.get('name', '')
+        from_email = email.from_address.get('email', '')
+        from_str = f"{from_name} <{from_email}>" if from_name else from_email
+
+        body_preview = (email.body_text or email.body_html or "")[:300]
+        if len(body_preview) == 300:
+            body_preview += "..."
+
+        return f"""主题: {email.subject}
+发件人: {from_str}
+时间: {email.received_at.strftime('%Y-%m-%d %H:%M')}
+正文摘要: {body_preview}"""
+
     def _on_send(self) -> None:
         text = self._input_line.text().strip()
         if not text:
@@ -3421,13 +3802,27 @@ class ClawMailApp(QMainWindow):
         self._ai_request_cancelled = False
         loop = asyncio.get_event_loop()
         try:
-            if self._ai_chat_mode == "mail_chat":
+            from clawmail.infrastructure.ai.agent_registry import AGENT_REGISTRY
+
+            agent_info = AGENT_REGISTRY.get(self._ai_chat_mode, AGENT_REGISTRY["user_chat"])
+            agent_id = agent_info["id"]
+
+            # Build prompt with context if applicable
+            prompt = text
+            if agent_info.get("context_aware") and self._current_email:
+                # Include email context for context-aware agents
+                email_context = self._build_email_context(self._current_email)
+                prompt = f"[当前邮件]\n{email_context}\n\n[用户问题]\n{text}"
+
+            # Route based on method
+            if agent_info["method"] == "process_email":
+                # mailAgent001 uses process_email method
                 response = await loop.run_in_executor(
-                    None, self._ai_bridge.process_email, text
+                    None, self._ai_bridge.process_email, prompt
                 )
-            else:
+            else:  # user_chat method for all other agents
                 response = await loop.run_in_executor(
-                    None, self._ai_bridge.user_chat, text
+                    None, self._ai_bridge.user_chat, prompt, agent_id
                 )
             if not self._ai_request_cancelled:
                 self._append_ai_message(response)

@@ -3,6 +3,7 @@ ClawMail 本地 HTTP REST API
 监听 127.0.0.1:9999，供外部 AI 助手远程调用。
 """
 import asyncio
+import json
 import uuid
 from datetime import datetime
 from typing import Optional, List
@@ -234,7 +235,8 @@ async def reply(req: ReplyRequest):
         ai_processor = None
         if _window and getattr(_window, "_ai_bridge", None):
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_processor = AIProcessor(_window._ai_bridge)
+            _data_dir = _window._db.data_dir if getattr(_window, "_db", None) else None
+            ai_processor = AIProcessor(_window._ai_bridge, _data_dir)
         
         # 格式化收件人和抄送
         to_str = ", ".join([a.get("email", "") for a in to_addresses])
@@ -930,6 +932,97 @@ async def ui_confirm_dialog(req: ConfirmDialogRequest):
         "selected_option_id": selected_id,
         "confirmed_at": datetime.utcnow().isoformat(),
     }
+
+
+# ── 个性化（OpenClaw skill 回调）──
+
+
+class PersonalizationStatusRequest(BaseModel):
+    prompt_type: str
+    success: bool
+    message: str = ""
+
+
+class ArchiveFeedbackRequest(BaseModel):
+    feedback_type: str
+
+
+class UpdatePromptRequest(BaseModel):
+    prompt_type: str
+    content: str
+
+
+@app.post("/personalization/status")
+async def personalization_status(req: PersonalizationStatusRequest):
+    """OpenClaw skill 完成个性化更新后的回调。"""
+    _check_ready()
+    if req.success:
+        if _window:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: _window._append_ai_message(
+                f"✅ 个性化更新完成：{req.prompt_type} 的评分标准已根据你的偏好调整。"
+            ))
+    return {"success": True}
+
+
+@app.get("/personalization/feedback/{feedback_type}")
+async def get_feedback(feedback_type: str):
+    """返回指定类型的反馈数据（供 OpenClaw skill 读取）。"""
+    _check_ready()
+    feedback_file = _db.data_dir / "feedback" / f"feedback_{feedback_type}.jsonl"
+    if not feedback_file.exists():
+        return {"records": [], "count": 0}
+    records = []
+    for line in feedback_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                pass
+    return {"records": records, "count": len(records)}
+
+
+@app.get("/personalization/prompt/{prompt_type}")
+async def get_prompt(prompt_type: str):
+    """返回指定类型的当前 prompt 内容。"""
+    _check_ready()
+    prompt_file = _db.data_dir / "prompts" / f"{prompt_type}.txt"
+    if not prompt_file.exists():
+        raise HTTPException(status_code=404, detail=f"Prompt not found: {prompt_type}")
+    content = prompt_file.read_text(encoding="utf-8")
+    return {"prompt_type": prompt_type, "content": content}
+
+
+@app.post("/personalization/archive-feedback")
+async def archive_feedback(req: ArchiveFeedbackRequest):
+    """将已消费的反馈文件归档到子目录，清空主文件。"""
+    _check_ready()
+    import shutil
+    feedback_file = _db.data_dir / "feedback" / f"feedback_{req.feedback_type}.jsonl"
+    archive_dir = _db.data_dir / "feedback" / req.feedback_type
+    archive_dir.mkdir(exist_ok=True)
+    if feedback_file.exists() and feedback_file.stat().st_size > 0:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
+        shutil.copy2(str(feedback_file), str(archive_dir / f"{ts}.jsonl"))
+        feedback_file.write_text("", encoding="utf-8")
+    return {"success": True}
+
+
+@app.post("/personalization/update-prompt")
+async def update_prompt(req: UpdatePromptRequest):
+    """备份旧 prompt 并写入新版本。"""
+    _check_ready()
+    import shutil
+    prompts_dir = _db.data_dir / "prompts"
+    prompt_file = prompts_dir / f"{req.prompt_type}.txt"
+    archive_dir = prompts_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    if prompt_file.exists():
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        shutil.copy2(str(prompt_file), str(archive_dir / f"{req.prompt_type}_{date_str}.txt"))
+    prompt_file.write_text(req.content, encoding="utf-8")
+    return {"success": True}
 
 
 # ── 启动函数（供 main.py 调用）──

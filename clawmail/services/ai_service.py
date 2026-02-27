@@ -30,7 +30,7 @@ class AIService(QObject):
     """
 
     email_processed    = pyqtSignal(str, str)  # (email_id, ai_status)
-    processing_started = pyqtSignal(str)       # (email_id) — 开始处理单封邮件
+    processing_started = pyqtSignal(str, int)   # (email_id, queue_remaining) — 开始处理单封邮件
 
     def __init__(self, db: ClawDB, ai_processor: AIProcessor, move_callback=None):
         super().__init__()
@@ -103,7 +103,7 @@ class AIService(QObject):
         if email.folder in ("草稿箱", "已删除", "已发送"):
             return
 
-        self.processing_started.emit(email_id)
+        self.processing_started.emit(email_id, self._queue.qsize())
         last_error = ""
         for attempt in range(MAX_RETRIES):
             try:

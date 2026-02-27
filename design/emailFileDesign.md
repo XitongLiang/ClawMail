@@ -50,8 +50,12 @@
 | `outline` | List[OutlineItem] | 邮件结构大纲（要点分解） |
 | `category` | List[String] | 智能分类标签（**规范值见 tech_spec.md 第3节**） |
 | `sentiment` | Enum | AI情感/紧急度：`urgent` / `positive` / `negative` / `neutral` |
+| `urgency` | Enum | 紧急度：`high` / `medium` / `low` |
+| `is_spam` | Boolean | 是否为垃圾邮件 |
 | `action_items` | List[ActionItem] | 待办事项提取 |
+| `reply_stances` | List[String] | AI 建议的回复立场 |
 | `suggested_reply` | String | AI建议的回复草稿（可为 null） |
+| `importance_score` | Int (0-100) | AI 评估的邮件重要性（详见 PersonalizationPlan.md） |
 | `language` | String | 检测语言（zh/en/ja等） |
 
 > **category 规范标签**（来自 `tech_spec.md` 3.1节）：
@@ -155,6 +159,10 @@ processed（正式显示在列表中）
     ],
     "category": ["urgent", "项目:项目A", "pending_reply"],
     "sentiment": "urgent",
+    "urgency": "high",
+    "is_spam": false,
+    "importance_score": 92,
+    "reply_stances": ["同意延期", "要求更详细排期"],
     "action_items": [
       {
         "text": "确认是否同意延期申请",

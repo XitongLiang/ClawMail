@@ -335,23 +335,49 @@ urgent / pending_reply / notification / subscription / meeting / approval
 
 ## Prompt管理架构
 
+### 代码层（Prompt 模板与渲染）
+
 ```
-prompts/
-├── __init__.py
-├── manager.py              # Prompt加载和渲染
-├── templates/              # 文本模板文件
-│   ├── mail_analysis.txt   # 功能1：信息补全
-│   ├── summarize.txt       # 功能2：摘要
-│   ├── classify.txt        # 功能3：分类
-│   ├── extract_tasks.txt   # 功能4：任务提取
-│   ├── compose.txt         # 功能5：撰写
-│   ├── polish.txt          # 功能6：润色
-│   ├── reply_suggest.txt   # 功能7：回复建议
-│   └── chat_assistant.txt  # 功能8：AI对话
-└── variables/              # 动态变量定义
-    ├── mail_schema.py      # 邮件JSON结构
-    └── user_context.py     # 用户上下文
+clawmail/infrastructure/ai/
+├── ai_processor.py         # AI 处理器，包含 DEFAULT_PROMPT_SECTIONS 默认值
+├── prompts/                # 代码内置 Prompt 模板
+│   ├── manager.py          # Prompt加载和渲染
+│   └── templates/          # 功能级完整模板
+│       ├── mail_analysis.txt
+│       ├── compose.txt
+│       └── ...
 ```
+
+### 用户数据层（可定制的评分标准 Prompt）
+
+AI 分析邮件时使用的各评分标准 prompt 存储在用户数据目录下，支持用户手动修改或 OpenClaw skill 自动更新：
+
+```
+~/clawmail_data/prompts/
+├── importance_score.txt    # 重要性评分说明（0-100 评分标准）
+├── category.txt            # 分类标签说明
+├── urgency.txt             # 紧急度说明
+├── is_spam.txt             # 垃圾邮件判断说明
+├── action_category.txt     # 行动项分类说明
+├── reply_stances.txt       # 回复立场说明
+└── archive/                # 旧版 prompt 存档
+    ├── importance_score_2026-02-25.txt
+    └── importance_score_2026-02-27.txt
+```
+
+- 首次启动时，由 `StorageManager.initialize()` 从 `DEFAULT_PROMPT_SECTIONS` 写入默认文件（不覆盖已有）
+- `AIProcessor._load_prompt_sections()` 运行时从文件加载，若文件缺失则回退到内置默认值
+- OpenClaw skill 更新 prompt 前，先将当前版本备份到 `archive/`（带日期后缀）
+
+### OpenClaw 个性化更新机制
+
+当用户修改重要性评分的反馈记录达到 5 条时，ClawMail 自动触发 OpenClaw 的 `clawmail-personalization` skill：
+1. Skill 读取反馈数据 + 当前 prompt + OpenClaw 用户侧写
+2. 大模型分析用户偏好，生成个性化 prompt
+3. 备份旧 prompt → `archive/`，归档旧反馈 → `feedback/importance_score/`
+4. 写入新 prompt，下次 AI 分析即生效
+
+完整流程详见 `PersonalizationPlan.md`
 
 **使用示例**：
 ```python

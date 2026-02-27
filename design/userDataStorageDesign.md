@@ -19,6 +19,23 @@ clawmail_data/                      # 用户数据主目录
 │   ├── ai_responses/               # AI结果缓存（相同请求复用）
 │   ├── thumbnails/                 # 附件缩略图
 │   └── search_index/
+├── chat_logs/                      # AI 对话记录（按 agent 分文件，追加模式）
+│   ├── mailAgent001.log            # 邮件 AI 分析对话
+│   ├── draftAgent001.log           # AI 回复草稿对话
+│   ├── generateAgent001.log        # AI 写邮件对话
+│   ├── polishAgent001.log          # AI 润色邮件对话
+│   └── personalizationAgent001.log # 个性化反馈/触发对话
+├── feedback/                       # 用户反馈数据（个性化闭环）
+│   ├── feedback_importance_score.jsonl  # 重要性评分修改记录（按 email_id 去重）
+│   └── importance_score/           # 已消费的历史反馈存档（带时间戳）
+├── prompts/                        # AI 评分标准 prompt（可由 OpenClaw skill 动态更新）
+│   ├── importance_score.txt        # 重要性评分说明
+│   ├── category.txt                # 分类说明
+│   ├── urgency.txt                 # 紧急度说明
+│   ├── is_spam.txt                 # 垃圾邮件说明
+│   ├── action_category.txt         # 行动项分类说明
+│   ├── reply_stances.txt           # 回复立场说明
+│   └── archive/                    # 旧版 prompt 存档（更新前自动备份）
 ├── exports/                        # 用户导出数据
 │   └── 2024-01-15_backup.zip
 ├── logs/                           # 运行日志
@@ -135,6 +152,12 @@ CREATE TABLE email_ai_metadata (
     categories TEXT,                        -- JSON分类标签数组（规范值见 tech_spec.md 第3节）
     sentiment TEXT,                         -- urgent/positive/negative/neutral
     suggested_reply TEXT,                   -- AI生成的建议回复草稿（可为空）
+    is_spam INTEGER DEFAULT NULL,           -- 1=垃圾邮件，0=正常
+    action_items TEXT,                      -- JSON行动项数组
+    reply_stances TEXT,                     -- JSON回复立场数组
+    urgency TEXT CHECK(urgency IN ('high','medium','low') OR urgency IS NULL),
+    importance_score INTEGER CHECK(importance_score BETWEEN 0 AND 100 OR importance_score IS NULL),
+    feedback_rating INTEGER CHECK(feedback_rating BETWEEN 1 AND 5 OR feedback_rating IS NULL),
 
     -- 处理状态（规范值见 tech_spec.md 2.2节）
     ai_status TEXT DEFAULT 'unprocessed',   -- unprocessed/processing/processed/failed/skipped
@@ -427,13 +450,22 @@ class EmailAIMetadata:
     summary_key_points: List[str] = None
     outline: List[Dict] = None
     categories: List[str] = None
+    urgency: Optional[str] = None             # "high" | "medium" | "low"
     sentiment: Optional[str] = None
     suggested_reply: Optional[str] = None
+    is_spam: Optional[bool] = None
+    action_items: Optional[List[Dict]] = None
+    reply_stances: Optional[List[str]] = None
+    importance_score: Optional[int] = None    # 0-100，AI 评估的邮件重要性
     ai_status: str = 'unprocessed'
     processing_progress: int = 0
     processing_stage: Optional[str] = None
     processed_at: Optional[datetime] = None
-    
+    processing_error: Optional[str] = None
+    feedback_rating: Optional[int] = None     # 1-5 用户评价
+    embedding_vector: Optional[bytes] = None
+    updated_at: Optional[datetime] = None
+
     def __post_init__(self):
         if self.keywords is None: self.keywords = []
         if self.summary_key_points is None: self.summary_key_points = []
@@ -480,9 +512,15 @@ class StorageManager:
         self.db_path = self.data_dir / 'clawmail.db'
         self.attachments_dir = self.data_dir / 'attachments'
         self.cache_dir = self.data_dir / 'cache'
-        
+
         # 初始化子目录
-        for subdir in [self.attachments_dir, self.cache_dir]:
+        for subdir in [self.attachments_dir, self.cache_dir,
+                       self.data_dir / 'chat_logs',
+                       self.data_dir / 'feedback',
+                       self.data_dir / 'feedback' / 'importance_score',
+                       self.data_dir / 'prompts',
+                       self.data_dir / 'prompts' / 'archive',
+                       self.data_dir / 'logs']:
             subdir.mkdir(exist_ok=True)
         
         # 初始化数据库
