@@ -571,13 +571,16 @@ class ComposeDialog(QDialog):
     async def _generate_draft_async(self):
         loop = asyncio.get_event_loop()
         try:
+            _account_id = self._account.id if self._account else None
             draft = await loop.run_in_executor(
                 None,
-                self._ai_processor.generate_reply_draft,
-                self._source_email,
-                self._selected_stance,
-                self._selected_tone,
-                self._notes_input.text().strip(),
+                lambda: self._ai_processor.generate_reply_draft(
+                    self._source_email,
+                    self._selected_stance,
+                    self._selected_tone,
+                    self._notes_input.text().strip(),
+                    account_id=_account_id,
+                ),
             )
             # 保存 AI 草稿用于隐式反馈
             self._ai_draft_text = draft
@@ -933,13 +936,20 @@ class ComposeDialog(QDialog):
                     keywords=kw,
                     one_line=ol,
                 )
-                # 检查是否触发个性化
+                # MemSkill: 触发 Executor 提取回复偏好记忆
                 parent = self.parent()
-                count = self._db.get_feedback_count("email_generation")
-                if (count >= 5 and parent
-                        and hasattr(parent, "_trigger_personalization")
-                        and getattr(parent, "_ai_bridge", None)):
-                    parent._trigger_personalization("email_generation")
+                if (source == "reply_draft" and parent
+                        and hasattr(parent, "_run_executor_reply")
+                        and getattr(parent, "_executor", None)):
+                    import asyncio as _aio
+                    _aio.ensure_future(parent._run_executor_reply(
+                        email_id,
+                        self._ai_draft_text,
+                        final_body,
+                        ratio,
+                        self._ai_draft_context.get("stance"),
+                        self._ai_draft_context.get("tone"),
+                    ))
 
         # ── 润色反馈 ──
         if self._polished_text is not None and final_body:
@@ -960,12 +970,6 @@ class ComposeDialog(QDialog):
                     user_final=final_body,
                     similarity_ratio=ratio,
                 )
-                parent = self.parent()
-                count = self._db.get_feedback_count("polish_email")
-                if (count >= 5 and parent
-                        and hasattr(parent, "_trigger_personalization")
-                        and getattr(parent, "_ai_bridge", None)):
-                    parent._trigger_personalization("polish_email")
 
     async def _send_via_graph(self, to_addresses, cc_addresses, subject, body,
                               html_body, attachments):

@@ -108,7 +108,7 @@ class AIService(QObject):
         for attempt in range(MAX_RETRIES):
             try:
                 meta = await loop.run_in_executor(
-                    None, self._processor.process_email, email
+                    None, self._processor.process_email, email, email.account_id
                 )
                 self._db.update_email_ai_metadata(meta)
                 # 双向垃圾邮件检测：根据 is_spam 结果自动移动邮件

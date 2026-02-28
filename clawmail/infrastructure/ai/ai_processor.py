@@ -253,14 +253,16 @@ class AIProcessor:
     """
     同步 AI 处理器，在线程池中调用 OpenClawBridge。
 
-    process_email() 成功时返回 ai_status='processed' 的 EmailAIMetadata，
+    process_email() 成功时返回 ai_status='processed' 的 EmailAIMetadata,
     失败时抛出 AIProcessingError，由调用方决定是否重试。
     """
 
-    def __init__(self, bridge, data_dir: Path = None):
-        """bridge: OpenClawBridge 实例, data_dir: 用户数据目录（用于加载自定义 prompt）"""
+    def __init__(self, bridge, data_dir: Path = None, memory_bank=None):
+        """bridge: OpenClawBridge 实例, data_dir: 用户数据目录（用于加载自定义 prompt）
+        memory_bank: MemoryBank 实例（可选，用于注入用户偏好记忆）"""
         self._bridge = bridge
         self._data_dir = data_dir
+        self._memory_bank = memory_bank
         self._prompt_cache: dict[str, str] = {}  # name → 上次加载时的完整内容
 
     def _load_template(self, name: str, default: str) -> str:
@@ -315,22 +317,32 @@ class AIProcessor:
             parts.append(DEFAULT_PROMPT_SECTIONS[name])
         return "\n\n".join(parts)
 
-    def process_email(self, email: Email) -> EmailAIMetadata:
+    def process_email(
+        self, email: Email, account_id: str = None
+    ) -> EmailAIMetadata:
         """
         对单封邮件执行 AI 统一提取分析。
         成功：返回 ai_status='processed' 的 EmailAIMetadata。
         失败：抛出 AIProcessingError。
+        account_id: 用户账户 ID，用于检索偏好记忆（可选）。
         """
         mail_input = self._build_mail_json(email)
+        prompt_sections = self._load_prompt_sections()
+
+        # MemSkill: 注入用户偏好记忆
+        memory_section = self._build_memory_section(email, account_id, "email_analysis")
+        if memory_section:
+            prompt_sections = memory_section + "\n\n" + prompt_sections
+
         template = self._load_template("mail_analysis", _PROMPT_TEMPLATE)
         prompt = (
             template
-            .replace("{prompt_sections}", self._load_prompt_sections())
+            .replace("{prompt_sections}", prompt_sections)
             .replace("{mail_json}", mail_input)
         )
 
         try:
-            raw = self._bridge.process_email(prompt, "mailAgent001")
+            raw = self._bridge.user_chat(prompt, "mailAgent001")
         except Exception as e:
             raise AIProcessingError(f"AI 调用失败: {e}") from e
 
@@ -338,25 +350,34 @@ class AIProcessor:
         return self._build_metadata(email.id, result, ai_status="processed")
 
     def generate_reply_draft(
-        self, email: Email, stance: str, tone: str, user_notes: str = ""
+        self, email: Email, stance: str, tone: str,
+        user_notes: str = "", account_id: str = None,
     ) -> str:
         """
         根据选定立场和风格生成回复草稿，返回正文字符串。
         失败时抛出 AIProcessingError。
+        account_id: 用户账户 ID，用于检索偏好记忆（可选）。
         """
         tone_desc, length_hint = _TONE_DESCRIPTIONS.get(tone, ("礼貌友好", "100-200字"))
         mail_input = self._build_mail_json(email)
         template = self._load_template("reply_draft", _DRAFT_PROMPT_TEMPLATE)
+
+        # MemSkill: 注入用户回复偏好记忆
+        memory_section = self._build_memory_section(email, account_id, "reply_draft")
+        user_notes_full = user_notes or "（无）"
+        if memory_section:
+            user_notes_full = user_notes_full + "\n\n" + memory_section
+
         prompt = (
             template
             .replace("{mail_json}", mail_input)
             .replace("{stance}", stance)
             .replace("{tone_desc}", tone_desc)
-            .replace("{user_notes}", user_notes or "（无）")
+            .replace("{user_notes}", user_notes_full)
             .replace("{length_hint}", length_hint)
         )
         try:
-            raw = self._bridge.process_email(prompt, "draftAgent001")
+            raw = self._bridge.user_chat(prompt, "draftAgent001")
         except Exception as e:
             raise AIProcessingError(f"草稿生成失败: {e}") from e
         return raw.strip()
@@ -376,7 +397,7 @@ class AIProcessor:
             .replace("{length_hint}", length_hint)
         )
         try:
-            raw = self._bridge.process_email(prompt, "generateAgent001")
+            raw = self._bridge.user_chat(prompt, "generateAgent001")
         except Exception as e:
             raise AIProcessingError(f"生成失败: {e}") from e
         return raw.strip()
@@ -395,10 +416,55 @@ class AIProcessor:
             .replace("{tone_desc}", tone_desc)
         )
         try:
-            raw = self._bridge.process_email(prompt, "polishAgent001")
+            raw = self._bridge.user_chat(prompt, "polishAgent001")
         except Exception as e:
             raise AIProcessingError(f"润色失败: {e}") from e
         return raw.strip()
+
+    # ----------------------------------------------------------------
+    # MemSkill: 记忆注入
+    # ----------------------------------------------------------------
+
+    def _build_memory_section(
+        self, email: Email, account_id: str = None, task_type: str = "email_analysis"
+    ) -> str:
+        """根据邮件和 task_type 检索用户记忆并格式化为 prompt 段落。无记忆时返回空字符串。"""
+        if not self._memory_bank:
+            print(f"[MemSkill] 记忆注入跳过: memory_bank 未初始化")
+            return ""
+        if not account_id:
+            print(f"[MemSkill] 记忆注入跳过: account_id 为空")
+            return ""
+
+        from_info = email.from_address or {}
+        sender_email = from_info.get("email", "")
+        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
+
+        try:
+            if task_type == "reply_draft":
+                memories = self._memory_bank.retrieve_for_reply(
+                    account_id, sender_email
+                )
+            else:
+                memories = self._memory_bank.retrieve_for_email(
+                    account_id, sender_email, sender_domain
+                )
+
+            if memories:
+                types = {}
+                for m in memories:
+                    types[m.memory_type] = types.get(m.memory_type, 0) + 1
+                print(f"[MemSkill] 检索到 {len(memories)} 条记忆 (task={task_type}, sender={sender_email}): {types}")
+            else:
+                print(f"[MemSkill] 无记忆 (task={task_type}, sender={sender_email}, account={account_id[:8]}...)")
+
+            text = self._memory_bank.format_memories_for_prompt(memories, task_type)
+            if text:
+                print(f"[MemSkill] 记忆段落已注入 prompt ({len(text)} 字符)")
+            return text
+        except Exception as e:
+            print(f"[MemSkill] 记忆检索失败: {e}")
+            return ""
 
     # ----------------------------------------------------------------
     # 内部工具

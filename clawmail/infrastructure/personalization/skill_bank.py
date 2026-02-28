@@ -1,0 +1,203 @@
+"""
+SkillBank — MemSkill 技能管理
+管理记忆提取技能的加载、存储和检索。
+提供 5 个手工设计的初始技能（importance scoring / summarizing / reply drafting）。
+"""
+
+import uuid
+from typing import List
+
+from clawmail.domain.models.memory import Skill
+
+
+# ============================================================
+# 5 个初始技能定义（手工设计）
+# ============================================================
+
+_INITIAL_SKILLS = [
+    {
+        "skill_name": "extract_sender_importance",
+        "skill_type": "insert",
+        "description": "从用户对特定发件人邮件的重要性修正中，提取发件人重要性偏好模式",
+        "instruction_template": """技能：提取发件人重要性模式
+
+目的：识别用户对不同发件人邮件重要性的个人偏好。
+
+适用场景：
+- 用户修正了某封邮件的重要性评分
+- 同一发件人多次出现评分偏差
+
+提取方法：
+- 记录发件人邮箱和姓名
+- 区分同一发件人的不同邮件类型（个人邮件 vs 群发通知 vs newsletter）
+- 记录用户给出的实际评分及修正幅度
+- 识别模式：该发件人的邮件通常被用户评为高/低重要性
+
+约束：
+- 同一发件人不同类型邮件要分别记录
+- 至少需要用户修正过一次才能建立偏好
+- 置信度随证据数量增加而提高
+
+输出格式：
+memory_type: sender_importance
+memory_key: 发件人邮箱
+content: {"sender_name": "姓名", "sender_email": "邮箱", "email_type": "类型", "typical_score": 分数, "pattern": "描述"}""",
+    },
+    {
+        "skill_name": "extract_urgency_signals",
+        "skill_type": "insert",
+        "description": "从用户的重要性修正中，学习用户个人的紧急信号偏好",
+        "instruction_template": """技能：提取紧急信号偏好
+
+目的：学习哪些关键词、短语或信号对该用户来说表示紧急/重要。
+
+适用场景：
+- 用户将包含某些词的邮件评为高重要性（AI 未识别）
+- 用户将包含传统紧急词的邮件评为低重要性（AI 过度反应）
+
+提取方法：
+- 对比邮件内容中的关键词与用户修正的方向
+- 如果用户调高分数：识别邮件中 AI 忽略的紧急信号
+- 如果用户调低分数：识别 AI 误判为紧急的词汇
+- 记录用户个人的紧急/非紧急关键词偏好
+
+约束：
+- 关注用户个人偏好与默认规则的差异
+- 不要记录与默认规则一致的信号（没有信息增益）
+
+输出格式：
+memory_type: urgency_signal
+memory_key: null（全局偏好）
+content: {"signal": "关键词/短语", "user_importance": "high/low", "default_importance": "high/low", "pattern": "描述"}""",
+    },
+    {
+        "skill_name": "detect_automated_content",
+        "skill_type": "insert",
+        "description": "识别用户对自动化/营销邮件的重要性偏好",
+        "instruction_template": """技能：识别自动化内容偏好
+
+目的：学习用户对自动发送邮件（系统通知、newsletter、营销邮件）的重要性偏好。
+
+适用场景：
+- 用户将自动化邮件评为较高重要性（某些系统邮件对用户很重要）
+- 用户将看似个人的邮件评为低重要性（实际是模板化群发）
+
+提取方法：
+- 检查发件人是否为 noreply、system、newsletter 等
+- 检查邮件是否包含取消订阅链接、批量发送标记
+- 记录用户对该类自动化邮件的实际偏好分数
+- 识别哪些自动化来源对用户重要，哪些不重要
+
+约束：
+- 区分不同来源的自动化邮件（CI/CD 通知可能很重要，营销可能不重要）
+- 使用发件人邮箱或域名作为 memory_key
+
+输出格式：
+memory_type: automated_content
+memory_key: 发件人邮箱或域名
+content: {"source": "来源描述", "content_type": "notification/newsletter/marketing/system", "typical_score": 分数, "pattern": "描述"}""",
+    },
+    {
+        "skill_name": "extract_summary_preferences",
+        "skill_type": "insert",
+        "description": "从用户的摘要反馈中，学习摘要风格偏好",
+        "instruction_template": """技能：提取摘要偏好
+
+目的：学习用户偏好什么样的邮件摘要风格。
+
+适用场景：
+- 用户对摘要给出"差评"并选择了具体原因
+- 用户多次反馈相似的摘要问题
+
+提取方法：
+- 分析用户选择的问题原因（太笼统、遗漏关键信息、重点偏移、太长、太短、关键词不准确）
+- 结合邮件原文和原始摘要，推断用户想要什么样的改进
+- 如果有用户补充说明，重点参考
+- 归纳用户的摘要偏好模式
+
+约束：
+- 只基于"差评"反馈提取偏好（"好评"表示当前已满足）
+- 偏好应该是可操作的指导（如"关键词应包含具体项目名"而非笼统的"更好"）
+- 全局偏好使用 null memory_key
+
+输出格式：
+memory_type: summary_preference
+memory_key: null（全局偏好）
+content: {"preference_type": "keywords/one_line/brief/key_points/general", "issue": "问题描述", "desired": "用户期望", "pattern": "描述"}""",
+    },
+    {
+        "skill_name": "track_response_patterns",
+        "skill_type": "insert",
+        "description": "从用户对回复草稿的修改中，学习回复风格偏好",
+        "instruction_template": """技能：追踪回复模式偏好
+
+目的：学习用户在不同场景下的回复风格偏好。
+
+适用场景：
+- 用户对 AI 生成的回复草稿进行了大幅修改（相似度 < 0.95）
+- 用户多次在回复中加入/删除特定元素
+
+提取方法：
+- 对比 AI 草稿和用户最终版本的差异
+- 识别用户的修改模式：
+  * 是否调整了语气（更正式/更轻松）
+  * 是否增删了开头/结尾语
+  * 是否调整了回复长度
+  * 是否加入了特定信息或删除了 AI 添加的内容
+- 结合回复的目标收件人（原邮件发件人），学习针对不同人的回复风格
+
+约束：
+- 区分通用偏好和针对特定收件人的偏好
+- 关注用户反复做出的修改（单次修改置信度低）
+- 针对特定收件人的偏好使用其邮箱作为 memory_key
+
+输出格式：
+memory_type: response_pattern
+memory_key: 收件人邮箱（针对性偏好）或 null（通用偏好）
+content: {"context": "场景", "preference": "偏好描述", "tone": "正式/礼貌/轻松/简短", "pattern": "描述"}""",
+    },
+]
+
+
+class SkillBank:
+    """管理 MemSkill 技能的加载与检索。"""
+
+    def __init__(self, db):
+        """db: ClawDB 实例。"""
+        self._db = db
+        self._ensure_initial_skills()
+
+    def _ensure_initial_skills(self) -> None:
+        """确保初始技能已存入数据库。只在数据库为空时插入默认技能。"""
+        existing = self._db.get_all_skills()
+        existing_names = {s.skill_name for s in existing}
+        for skill_def in _INITIAL_SKILLS:
+            if skill_def["skill_name"] not in existing_names:
+                skill = Skill(
+                    id=str(uuid.uuid4()),
+                    skill_name=skill_def["skill_name"],
+                    skill_type=skill_def["skill_type"],
+                    description=skill_def["description"],
+                    instruction_template=skill_def["instruction_template"],
+                )
+                self._db.save_skill(skill)
+
+    def get_all_skills(self) -> List[Skill]:
+        """返回所有已注册的技能。"""
+        return self._db.get_all_skills()
+
+    def get_skill(self, skill_name: str):
+        """按名称获取技能。"""
+        return self._db.get_skill(skill_name)
+
+    def format_skills_for_prompt(self, skills: List[Skill] = None) -> str:
+        """将技能列表格式化为 Executor prompt 中的技能说明段。"""
+        if skills is None:
+            skills = self.get_all_skills()
+        parts = []
+        for i, skill in enumerate(skills, 1):
+            parts.append(
+                f"--- 技能 {i}: {skill.skill_name} ---\n"
+                f"{skill.instruction_template}"
+            )
+        return "\n\n".join(parts)

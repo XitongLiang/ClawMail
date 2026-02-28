@@ -300,9 +300,10 @@ class _EmailWebPage(QWebEnginePage):
     """拦截邮件中的链接点击，改为在系统浏览器中打开，防止在视图内部跳转。
     clawmail-todo:// 协议链接不打开浏览器，改为发射 todo_link_clicked 信号。"""
 
-    todo_link_clicked       = pyqtSignal(str)  # 发射 clawmail-todo:// 完整 URL
-    action_link_clicked     = pyqtSignal(str)  # 发射 clawmail-action:// host（reply/reply-all/forward）
-    importance_edit_clicked  = pyqtSignal(str)  # 发射 clawmail-importance://edit?... 完整 URL
+    todo_link_clicked           = pyqtSignal(str)  # 发射 clawmail-todo:// 完整 URL
+    action_link_clicked         = pyqtSignal(str)  # 发射 clawmail-action:// host（reply/reply-all/forward）
+    importance_edit_clicked      = pyqtSignal(str)  # 发射 clawmail-importance://edit?... 完整 URL
+    summary_feedback_clicked     = pyqtSignal(str)  # 发射 clawmail-summary-feedback://good|bad?... 完整 URL
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
         if nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
@@ -314,6 +315,9 @@ class _EmailWebPage(QWebEnginePage):
                 return False
             if url.scheme() == "clawmail-importance":
                 self.importance_edit_clicked.emit(url.toString())
+                return False
+            if url.scheme() == "clawmail-summary-feedback":
+                self.summary_feedback_clicked.emit(url.toString())
                 return False
             QDesktopServices.openUrl(url)
             return False  # 阻止在 WebView 内部跳转
@@ -341,6 +345,11 @@ class ClawMailApp(QMainWindow):
         self._ai_bridge = None
         self._ai_processing_total = 0   # 当前批次总邮件数
         self._ai_processing_done = 0    # 当前批次已完成数
+        # MemSkill 个性化组件
+        self._memory_bank = None
+        self._skill_bank = None
+        self._executor = None
+        self._designer = None
         self._current_folder = "INBOX"
         self._sort_by_importance: bool = False
         self._current_category: Optional[str] = None  # AI 分类筛选
@@ -640,6 +649,7 @@ class ClawMailApp(QMainWindow):
         )
         self._content_view.page().todo_link_clicked.connect(self._on_todo_link_clicked)
         self._content_view.page().importance_edit_clicked.connect(self._on_importance_edit_clicked)
+        self._content_view.page().summary_feedback_clicked.connect(self._on_summary_feedback)
 
         # 回复工具栏（Qt 按钮，直接调用方法，可靠）
         _content_panel = QWidget()
@@ -1024,8 +1034,15 @@ class ClawMailApp(QMainWindow):
         sync_svc = SyncService(self._db, self._cred)
         self.set_sync_service(sync_svc, account_id=account_id)
 
+        # MemSkill 个性化组件初始化
+        self._init_memskill()
+
         if self._ai_bridge:
-            ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
+            ai_processor = AIProcessor(
+                self._ai_bridge,
+                self._db.data_dir if self._db else None,
+                memory_bank=self._memory_bank,
+            )
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)
             sync_svc.email_synced.connect(ai_svc.enqueue)
@@ -1980,7 +1997,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
         # 通过 in_reply_to 字段（存储的是源邮件 DB id）恢复源邮件
         source_email = None
         source_ai_meta = None
@@ -2034,7 +2051,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
 
         dlg = ComposeDialog(self._db, self._cred, accs[0],
                             ai_processor=ai_proc, parent=self)
@@ -2065,7 +2082,7 @@ class ClawMailApp(QMainWindow):
         ai_proc = None
         if self._ai_bridge:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None)
+            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
 
         from_info = email.from_address or {}
         to_addr = from_info.get("email", "")
@@ -2320,11 +2337,24 @@ class ClawMailApp(QMainWindow):
                     f"text-decoration:none;border:1px solid {_border};"
                     f"border-radius:3px;padding:0 4px;cursor:pointer'>✏️</a>"
                 )
+        # 👍/👎 摘要反馈按钮
+        import urllib.parse as _up_fb
+        _fb_params = _up_fb.urlencode({"email_id": meta.email_id})
+        _fb_good = f"clawmail-summary-feedback://good?{_fb_params}"
+        _fb_bad = f"clawmail-summary-feedback://bad?{_fb_params}"
+        feedback_btns = (
+            f"<span style='float:right;margin-top:-2px'>"
+            f"<a href='{_fb_good}' style='text-decoration:none;font-size:13px;"
+            f"padding:1px 4px;cursor:pointer' title='摘要准确'>👍</a>"
+            f"<a href='{_fb_bad}' style='text-decoration:none;font-size:13px;"
+            f"padding:1px 4px;cursor:pointer' title='摘要不好'>👎</a>"
+            f"</span>"
+        )
         return (
             f"<div style='padding:10px 14px;background:{_panel};"
             f"border-bottom:1px solid {_border};font-family:sans-serif'>"
             f"<div style='font-size:11px;color:{_label};font-weight:bold;"
-            f"margin-bottom:6px'>🤖 AI 分析{score_badge}</div>"
+            f"margin-bottom:6px'>{feedback_btns}🤖 AI 分析{score_badge}</div>"
             f"{body}"
             "</div>"
         )
@@ -2433,107 +2463,256 @@ class ClawMailApp(QMainWindow):
         self, email_id: str, old_score: int, new_score: int,
         mode: str, context: dict | None = None,
     ) -> None:
-        """更新数据库 + 记录反馈 + 刷新视图。"""
+        """更新数据库 + 触发 MemSkill + 刷新视图。"""
         if not self._db:
             return
         # 更新数据库
         self._db.update_importance_score(email_id, new_score)
-        # 记录反馈
-        email = self._db.get_email(email_id)
-        subject = email.subject if email else ""
-        meta = self._db.get_email_ai_metadata(email_id)
-        ai_summary = {
-            "keywords": meta.keywords if meta else None,
-            "one_line": meta.summary_one_line if meta else None,
-            "brief": meta.summary_brief if meta else None,
-            "key_points": meta.summary_key_points if meta else None,
-        }
-        self._db.record_importance_feedback(
-            email_id=email_id,
-            subject=subject,
-            ai_summary=ai_summary,
-            original_score=old_score,
-            new_score=new_score,
-            mode=mode,
-            context=context,
-        )
         # 刷新邮件详情视图
         if self._current_email and self._current_email.id == email_id:
             self._on_email_selected(self._email_list.currentItem(), None)
         # 手动输入时刷新列表（拖拽不需要，位置已由用户决定）
         if mode == "manual_input" and self._sort_by_importance:
             self.refresh_email_list(self._current_folder)
-        # 检查反馈数量，达到 5 条时触发 OpenClaw 个性化更新
-        count = self._db.get_feedback_count("importance_score")
-        if count >= 5 and self._ai_bridge:
-            self._trigger_personalization("importance_score")
+        # MemSkill: 触发 Executor 提取用户偏好记忆
+        if self._executor and self._current_account_id:
+            asyncio.ensure_future(self._run_executor_importance(
+                email_id, old_score, new_score
+            ))
 
-    # email_generation 需要同时更新两个 prompt
-    _PROMPT_PATHS_MAP: dict = {
-        "email_generation": ["reply_draft", "generate_email"],
-    }
+    # ----------------------------------------------------------------
+    # MemSkill 初始化与 Executor 调用
+    # ----------------------------------------------------------------
 
-    def _trigger_personalization(self, prompt_type: str) -> None:
-        """反馈累积 ≥5 条，向 OpenClaw 发消息触发 clawmail-personalization skill。
-        触发前先归档当前反馈和 prompt（保险：防止 OpenClaw 绕过 API 直接操作文件）。"""
-        from datetime import datetime as _dt
-        import shutil as _shutil
-
-        prompts_dir = self._db.data_dir / "prompts"
-        prompt_archive_dir_path = prompts_dir / "archive"
-        feedback_file = self._db.data_dir / "feedback" / f"feedback_{prompt_type}.jsonl"
-        feedback_archive_dir = self._db.data_dir / "feedback" / prompt_type
-
-        # 确定要更新的 prompt 文件列表
-        prompt_names = self._PROMPT_PATHS_MAP.get(prompt_type, [prompt_type])
-
-        # 保险归档：反馈
+    def _init_memskill(self) -> None:
+        """初始化 MemSkill 个性化组件（MemoryBank / SkillBank / Executor / Designer）。"""
+        if not self._db or not self._ai_bridge:
+            return
         try:
-            if feedback_file.exists() and feedback_file.stat().st_size > 0:
-                feedback_archive_dir.mkdir(exist_ok=True)
-                ts = _dt.now().strftime("%Y-%m-%dT%H-%M-%S")
-                _shutil.copy2(str(feedback_file), str(feedback_archive_dir / f"{ts}.jsonl"))
+            from clawmail.infrastructure.personalization.memory_bank import MemoryBank
+            from clawmail.infrastructure.personalization.skill_bank import SkillBank
+            from clawmail.infrastructure.personalization.executor import Executor
+            from clawmail.infrastructure.personalization.designer import Designer
+
+            feedback_dir = self._db.data_dir / "feedback"
+            self._memory_bank = MemoryBank(self._db)
+            self._skill_bank = SkillBank(self._db)
+            self._executor = Executor(
+                self._ai_bridge, self._memory_bank, self._skill_bank,
+                log_dir=feedback_dir,
+            )
+            self._designer = Designer(
+                self._ai_bridge, self._skill_bank, feedback_dir,
+            )
+            print("[MemSkill] 个性化组件初始化完成（含 Designer）")
+        except Exception as e:
+            print(f"[MemSkill] 初始化失败: {e}")
+            self._memory_bank = None
+            self._skill_bank = None
+            self._executor = None
+            self._designer = None
+
+    async def _run_executor_importance(
+        self, email_id: str, old_score: int, new_score: int
+    ) -> None:
+        """异步运行 Executor 处理重要性修正。"""
+        if not self._executor or not self._current_account_id:
+            return
+        email = self._db.get_email(email_id) if self._db else None
+        if not email:
+            return
+        from_info = email.from_address or {}
+        sender_email = from_info.get("email", "")
+        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
+        email_data = {
+            "subject": email.subject or "",
+            "from": from_info,
+            "body_text": (email.body_text or "")[:1000],
+        }
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(
+                None,
+                self._executor.execute_importance_feedback,
+                self._current_account_id,
+                email_data,
+                old_score,
+                new_score,
+                sender_email,
+                sender_domain,
+            )
+            if count:
+                print(f"[MemSkill] 重要性反馈 → {count} 条记忆更新")
+        except Exception as e:
+            print(f"[MemSkill] Executor 重要性处理失败: {e}")
+        self._check_designer_trigger()
+
+    async def _run_executor_summary(
+        self, email_id: str, original_summary: dict,
+        reasons: list, user_comment: str = None
+    ) -> None:
+        """异步运行 Executor 处理摘要差评反馈。"""
+        if not self._executor or not self._current_account_id:
+            return
+        email = self._db.get_email(email_id) if self._db else None
+        if not email:
+            return
+        from_info = email.from_address or {}
+        sender_email = from_info.get("email", "")
+        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
+        email_data = {
+            "subject": email.subject or "",
+            "from": from_info,
+            "body_text": (email.body_text or "")[:1000],
+        }
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(
+                None,
+                self._executor.execute_summary_feedback,
+                self._current_account_id,
+                email_data,
+                original_summary,
+                reasons,
+                user_comment,
+                sender_email,
+                sender_domain,
+            )
+            if count:
+                print(f"[MemSkill] 摘要反馈 → {count} 条记忆更新")
+        except Exception as e:
+            print(f"[MemSkill] Executor 摘要处理失败: {e}")
+        self._check_designer_trigger()
+
+    async def _run_executor_reply(
+        self, email_id: str, ai_draft: str, user_final: str,
+        similarity_ratio: float, stance: str = None, tone: str = None
+    ) -> None:
+        """异步运行 Executor 处理回复草稿隐式反馈。"""
+        if not self._executor or not self._current_account_id:
+            return
+        email = self._db.get_email(email_id) if self._db else None
+        if not email:
+            return
+        from_info = email.from_address or {}
+        recipient_email = from_info.get("email", "")
+        email_data = {
+            "subject": email.subject or "",
+            "from": from_info,
+            "body_text": (email.body_text or "")[:1000],
+        }
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(
+                None,
+                self._executor.execute_reply_feedback,
+                self._current_account_id,
+                email_data,
+                ai_draft,
+                user_final,
+                similarity_ratio,
+                stance,
+                tone,
+                recipient_email,
+            )
+            if count:
+                print(f"[MemSkill] 回复反馈 → {count} 条记忆更新")
+        except Exception as e:
+            print(f"[MemSkill] Executor 回复处理失败: {e}")
+        self._check_designer_trigger()
+
+    def _check_designer_trigger(self) -> None:
+        """Executor 执行后检查是否触发 Designer 技能演化。"""
+        if not self._designer:
+            return
+        try:
+            if self._designer.should_run():
+                asyncio.ensure_future(self._run_designer())
+        except Exception as e:
+            print(f"[Designer] 触发检查失败: {e}")
+
+    async def _run_designer(self) -> None:
+        """异步运行 Designer 技能演化流程。"""
+        print("[Designer] 开始技能演化...")
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self._designer.run)
+            changes = result.get("changes", [])
+            if changes:
+                print(f"[Designer] 技能演化完成: {len(changes)} 项变更")
+                for c in changes:
+                    print(f"  - {c.get('action', '?')}: {c.get('skill_name', '?')}")
+            else:
+                print(f"[Designer] 分析完成，无需变更")
+        except Exception as e:
+            print(f"[Designer] 技能演化失败: {e}")
+
+    # ----------------------------------------------------------------
+    # 摘要反馈
+    # ----------------------------------------------------------------
+
+    def _on_summary_feedback(self, url_str: str) -> None:
+        """用户点击 AI 摘要面板的 👍/👎 按钮。"""
+        import urllib.parse as _up
+        try:
+            parsed = _up.urlparse(url_str)
+            params = dict(_up.parse_qsl(parsed.query))
         except Exception:
-            pass
+            return
+        rating = parsed.hostname  # "good" or "bad"
+        email_id = params.get("email_id")
+        if not email_id or not self._db or rating not in ("good", "bad"):
+            return
 
-        # 保险归档：所有相关 prompt
-        for pname in prompt_names:
-            try:
-                pf = prompts_dir / f"{pname}.txt"
-                if pf.exists():
-                    prompt_archive_dir_path.mkdir(exist_ok=True)
-                    date_str = _dt.now().strftime("%Y-%m-%d_%H%M%S")
-                    _shutil.copy2(str(pf), str(prompt_archive_dir_path / f"{pname}_{date_str}.txt"))
-            except Exception:
-                pass
+        email = self._db.get_email(email_id)
+        meta = self._db.get_email_ai_metadata(email_id)
+        if not email or not meta:
+            return
 
-        feedback_path = str(feedback_file)
-        archive_dir = str(feedback_archive_dir)
-        prompt_archive_dir = str(prompt_archive_dir_path)
-        prompt_paths_str = str(prompt_names)
+        reasons: list[str] = []
+        user_comment: str | None = None
 
-        trigger_msg = (
-            f"(ClawMail-Personalization) 用户已累积足够的{prompt_type}反馈，"
-            f"请触发 clawmail-personalization skill。\n"
-            f"feedback_type: {prompt_type}\n"
-            f"feedback_path: {feedback_path}\n"
-            f"prompt_paths: {prompt_paths_str}\n"
-            f"related_prompts: []\n"
-            f"archive_dir: {archive_dir}\n"
-            f"prompt_archive_dir: {prompt_archive_dir}\n"
+        if rating == "bad":
+            # 弹出原因选择对话框
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QLineEdit, QDialogButtonBox, QLabel
+            dlg = QDialog(self)
+            dlg.setWindowTitle("摘要反馈")
+            dlg.setMinimumWidth(320)
+            layout = QVBoxLayout(dlg)
+            layout.addWidget(QLabel("请选择摘要问题（可多选）："))
+
+            _REASONS = ["太笼统", "遗漏关键信息", "重点偏移", "太长", "太短", "关键词不准确"]
+            checkboxes = []
+            for r in _REASONS:
+                cb = QCheckBox(r)
+                layout.addWidget(cb)
+                checkboxes.append(cb)
+
+            layout.addWidget(QLabel("补充说明（可选）："))
+            comment_input = QLineEdit()
+            comment_input.setPlaceholderText("其他意见...")
+            layout.addWidget(comment_input)
+
+            btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            btn_box.accepted.connect(dlg.accept)
+            btn_box.rejected.connect(dlg.reject)
+            layout.addWidget(btn_box)
+
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            reasons = [_REASONS[i] for i, cb in enumerate(checkboxes) if cb.isChecked()]
+            comment_text = comment_input.text().strip()
+            user_comment = comment_text if comment_text else None
+
+        summary = meta.summary or {}
+        self._status_bar.showMessage(
+            f"{'👍' if rating == 'good' else '👎'} 感谢反馈", 2500
         )
-
-        async def _send():
-            try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: self._ai_bridge.user_chat(trigger_msg, "personalizationAgent001"),
-                )
-            except Exception as e:
-                print(f"[Personalization] 触发失败: {e}")
-
-        asyncio.ensure_future(_send())
+        # MemSkill: 差评时触发 Executor 提取摘要偏好
+        if rating == "bad" and self._executor and self._current_account_id:
+            asyncio.ensure_future(self._run_executor_summary(
+                email_id, summary, reasons, user_comment
+            ))
 
     def _on_email_rows_moved(self, _parent, start, _end, _dest, dest_row) -> None:
         """拖拽排序后，根据上下邻居计算新的 importance_score。"""
@@ -2853,7 +3032,8 @@ class ClawMailApp(QMainWindow):
         sync_svc = SyncService(self._db, self._cred)
         self.set_sync_service(sync_svc, account_id=account.id)
 
-        ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None) if self._ai_bridge else None
+        self._init_memskill()
+        ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank) if self._ai_bridge else None
         if ai_processor:
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)
@@ -3498,16 +3678,9 @@ class ClawMailApp(QMainWindow):
                 email_context = self._build_email_context(self._current_email)
                 prompt = f"[当前邮件]\n{email_context}\n\n[用户问题]\n{text}"
 
-            # Route based on method
-            if agent_info["method"] == "process_email":
-                # mailAgent001 uses process_email method
-                response = await loop.run_in_executor(
-                    None, self._ai_bridge.process_email, prompt
-                )
-            else:  # user_chat method for all other agents
-                response = await loop.run_in_executor(
-                    None, self._ai_bridge.user_chat, prompt, agent_id
-                )
+            response = await loop.run_in_executor(
+                None, self._ai_bridge.user_chat, prompt, agent_id
+            )
             if not self._ai_request_cancelled:
                 self._append_ai_message(response)
         except asyncio.CancelledError:

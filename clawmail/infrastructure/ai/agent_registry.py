@@ -16,7 +16,7 @@ AGENT_REGISTRY = {
         "id": "mailAgent001",
         "name": "邮件分析 (mailAgent001)",
         "description": "分析邮件内容，提取关键信息和行动项",
-        "method": "process_email",
+        "method": "user_chat",
         "context_aware": True,
     },
     "personalization_chat": {

@@ -4,6 +4,8 @@ ClawDB — SQLite 数据访问层
 Schema 来源：design/userDataStorageDesign.md
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
 import uuid
@@ -15,6 +17,7 @@ from typing import Dict, List, Optional, Any
 
 from clawmail.domain.models.account import Account
 from clawmail.domain.models.email import Email, EmailAIMetadata
+from clawmail.domain.models.memory import UserMemory, Skill
 from clawmail.domain.models.task import Task
 
 
@@ -211,6 +214,32 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     user_context TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 10. MemSkill 用户偏好记忆表
+CREATE TABLE IF NOT EXISTS user_preference_memory (
+    id TEXT PRIMARY KEY,
+    user_account_id TEXT NOT NULL,
+    memory_type TEXT NOT NULL,
+    memory_key TEXT,
+    memory_content TEXT NOT NULL,
+    confidence_score REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,
+    last_updated TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+-- 11. MemSkill 技能库表
+CREATE TABLE IF NOT EXISTS skill_bank (
+    id TEXT PRIMARY KEY,
+    skill_name TEXT UNIQUE NOT NULL,
+    skill_type TEXT NOT NULL,
+    description TEXT,
+    instruction_template TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 _INDEXES = """
@@ -228,6 +257,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due       ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_tasks_email     ON tasks(source_email_id);
 
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
+
+CREATE INDEX IF NOT EXISTS idx_memory_user_type ON user_preference_memory(user_account_id, memory_type);
+CREATE INDEX IF NOT EXISTS idx_memory_key ON user_preference_memory(user_account_id, memory_key);
 """
 
 _FTS5 = """
@@ -307,6 +339,7 @@ class ClawDB:
         (self.data_dir / "feedback" / "importance_score").mkdir(exist_ok=True)
         (self.data_dir / "feedback" / "email_generation").mkdir(exist_ok=True)
         (self.data_dir / "feedback" / "polish_email").mkdir(exist_ok=True)
+        (self.data_dir / "feedback" / "summary").mkdir(exist_ok=True)
 
         # 创建 chat_logs 目录（AI 对话记录）
         (self.data_dir / "chat_logs").mkdir(exist_ok=True)
@@ -618,61 +651,6 @@ class ClawDB:
                 (new_score, datetime.utcnow().isoformat(), email_id),
             )
             conn.commit()
-
-    def record_importance_feedback(
-        self,
-        email_id: str,
-        subject: str,
-        ai_summary: dict,
-        original_score: int,
-        new_score: int,
-        mode: str,
-        context: dict | None = None,
-    ) -> None:
-        """记录用户对 importance_score 的修改到 JSONL 文件。
-        同一封邮件只保留最后一次修改（按 email_id 去重）。
-        ai_summary 包含 keywords, one_line, brief, key_points。"""
-        feedback_file = self.data_dir / "feedback" / "feedback_importance_score.jsonl"
-        # 读取已有记录，过滤掉同一 email_id 的旧记录
-        existing: list[str] = []
-        if feedback_file.exists():
-            for line in feedback_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("email_id") != email_id:
-                        existing.append(line)
-                except json.JSONDecodeError:
-                    existing.append(line)
-        # 追加新记录
-        record = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "email_id": email_id,
-            "subject": subject,
-            "keywords": ai_summary.get("keywords"),
-            "one_line": ai_summary.get("one_line"),
-            "brief": ai_summary.get("brief"),
-            "key_points": ai_summary.get("key_points"),
-            "original_score": original_score,
-            "new_score": new_score,
-            "mode": mode,
-            "context": context,
-        }
-        existing.append(json.dumps(record, ensure_ascii=False))
-        feedback_file.write_text("\n".join(existing) + "\n", encoding="utf-8")
-
-    def get_feedback_count(self, feedback_type: str = "importance_score") -> int:
-        """返回当前反馈文件中的记录条数。"""
-        feedback_file = self.data_dir / "feedback" / f"feedback_{feedback_type}.jsonl"
-        if not feedback_file.exists():
-            return 0
-        count = 0
-        for line in feedback_file.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                count += 1
-        return count
 
     def record_email_generation_feedback(
         self,
@@ -1355,3 +1333,204 @@ class ClawDB:
                 ),
             )
             conn.commit()
+
+    # --------------------------------------------------------
+    # MemSkill: user_preference_memory
+    # --------------------------------------------------------
+
+    def upsert_memory(self, memory: UserMemory) -> None:
+        """插入或更新用户偏好记忆。"""
+        with self.get_conn() as conn:
+            conn.execute(
+                """INSERT INTO user_preference_memory
+                   (id, user_account_id, memory_type, memory_key,
+                    memory_content, confidence_score, evidence_count,
+                    last_updated, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       memory_content = excluded.memory_content,
+                       confidence_score = excluded.confidence_score,
+                       evidence_count = excluded.evidence_count,
+                       last_updated = excluded.last_updated""",
+                (
+                    memory.id,
+                    memory.user_account_id,
+                    memory.memory_type,
+                    memory.memory_key,
+                    json.dumps(memory.memory_content, ensure_ascii=False)
+                    if memory.memory_content else "{}",
+                    memory.confidence_score,
+                    memory.evidence_count,
+                    datetime.utcnow().isoformat(),
+                    memory.created_at.isoformat()
+                    if memory.created_at else datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_memories_by_type(
+        self, account_id: str, memory_type: str
+    ) -> List[UserMemory]:
+        """按 memory_type 查询用户偏好记忆。"""
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_preference_memory
+                   WHERE user_account_id = ? AND memory_type = ?
+                   ORDER BY confidence_score DESC""",
+                (account_id, memory_type),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_memories_for_sender(
+        self, account_id: str, sender_email: str
+    ) -> List[UserMemory]:
+        """查询与指定发件人相关的偏好记忆。"""
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_preference_memory
+                   WHERE user_account_id = ? AND memory_key = ?
+                   ORDER BY confidence_score DESC""",
+                (account_id, sender_email),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_memories_for_email(
+        self, account_id: str, sender_email: str, sender_domain: str,
+        memory_types: list = None,
+    ) -> List[UserMemory]:
+        """检索与当前邮件相关的偏好记忆（按发件人 + 域名 + 全局偏好）。
+        memory_types: 可选，限定返回的 memory_type 列表。为空时返回所有类型。
+        """
+        with self.get_conn() as conn:
+            if memory_types:
+                placeholders = ",".join("?" for _ in memory_types)
+                rows = conn.execute(
+                    f"""SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ?
+                         AND memory_type IN ({placeholders})
+                         AND (memory_key IS NULL
+                              OR memory_key = ?
+                              OR memory_key = ?)
+                       ORDER BY confidence_score DESC""",
+                    (account_id, *memory_types, sender_email, sender_domain),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ?
+                         AND (memory_key IS NULL
+                              OR memory_key = ?
+                              OR memory_key = ?)
+                       ORDER BY confidence_score DESC""",
+                    (account_id, sender_email, sender_domain),
+                ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_all_memories(
+        self, account_id: str, memory_types: list = None,
+    ) -> List[UserMemory]:
+        """返回用户的偏好记忆。
+        memory_types: 可选，限定返回的 memory_type 列表。为空时返回所有类型。
+        """
+        with self.get_conn() as conn:
+            if memory_types:
+                placeholders = ",".join("?" for _ in memory_types)
+                rows = conn.execute(
+                    f"""SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ?
+                         AND memory_type IN ({placeholders})
+                       ORDER BY memory_type, confidence_score DESC""",
+                    (account_id, *memory_types),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ?
+                       ORDER BY memory_type, confidence_score DESC""",
+                    (account_id,),
+                ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def delete_memory(self, memory_id: str) -> None:
+        """删除指定偏好记忆。"""
+        with self.get_conn() as conn:
+            conn.execute(
+                "DELETE FROM user_preference_memory WHERE id = ?",
+                (memory_id,),
+            )
+            conn.commit()
+
+    def _row_to_memory(self, row: sqlite3.Row) -> UserMemory:
+        d = dict(row)
+        content = d.get("memory_content")
+        if content:
+            try:
+                d["memory_content"] = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                d["memory_content"] = {}
+        for dt_field in ("last_updated", "created_at"):
+            if d.get(dt_field):
+                try:
+                    d[dt_field] = datetime.fromisoformat(d[dt_field])
+                except (ValueError, TypeError):
+                    d[dt_field] = None
+        return UserMemory(**{k: v for k, v in d.items()
+                            if k in UserMemory.__dataclass_fields__})
+
+    # --------------------------------------------------------
+    # MemSkill: skill_bank
+    # --------------------------------------------------------
+
+    def save_skill(self, skill: Skill) -> None:
+        """保存或更新技能定义。"""
+        with self.get_conn() as conn:
+            conn.execute(
+                """INSERT INTO skill_bank
+                   (id, skill_name, skill_type, description,
+                    instruction_template, version, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       instruction_template = excluded.instruction_template,
+                       version = excluded.version,
+                       updated_at = excluded.updated_at""",
+                (
+                    skill.id,
+                    skill.skill_name,
+                    skill.skill_type,
+                    skill.description,
+                    skill.instruction_template,
+                    skill.version,
+                    skill.created_at.isoformat()
+                    if skill.created_at else datetime.utcnow().isoformat(),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_all_skills(self) -> List[Skill]:
+        """返回所有技能定义。"""
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skill_bank ORDER BY skill_name"
+            ).fetchall()
+        return [self._row_to_skill(r) for r in rows]
+
+    def get_skill(self, skill_name: str) -> Optional[Skill]:
+        """按名称查询技能。"""
+        with self.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM skill_bank WHERE skill_name = ?",
+                (skill_name,),
+            ).fetchone()
+        return self._row_to_skill(row) if row else None
+
+    def _row_to_skill(self, row: sqlite3.Row) -> Skill:
+        d = dict(row)
+        for dt_field in ("created_at", "updated_at"):
+            if d.get(dt_field):
+                try:
+                    d[dt_field] = datetime.fromisoformat(d[dt_field])
+                except (ValueError, TypeError):
+                    d[dt_field] = None
+        return Skill(**{k: v for k, v in d.items()
+                        if k in Skill.__dataclass_fields__})

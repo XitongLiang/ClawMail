@@ -15,9 +15,7 @@ class OpenClawBridge:
     """
     同步 AI 调用封装。在 Plugin 层通过 run_in_executor 转为异步。
 
-    两种 agent 类型：
-    - mailAgent_{email_id[:8]}  —— 邮件处理（process_email）
-    - userAgent001              —— 用户对话（user_chat）
+    统一方法 user_chat() 处理所有 agent 调用，通过 user_id 区分 agent。
     """
 
     def __init__(
@@ -33,36 +31,19 @@ class OpenClawBridge:
         if self._log_dir:
             self._log_dir.mkdir(parents=True, exist_ok=True)
 
-    def process_email(
-        self,
-        mail_input: str,
-        mail_id: str = "mailAgent001",
-    ) -> str:
-        """
-        邮件 AI 处理，对应 ClawChat.mailChat 模式。
-        mail_id 固定使用 mailAgent001。
-        """
-        messages = [{"role": "user", "content": f"(ClawMail){mail_input}"}]
-        full_response = ""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=True,
-            user=mail_id,
-        )
-        for chunk in response:
-            if chunk.choices[0].delta.content:
-                full_response += chunk.choices[0].delta.content
-        self._save_chat_log(mail_id, f"(ClawMail){mail_input}", full_response)
-        return full_response
-
     def user_chat(
         self,
         user_input: str,
         user_id: str = "userAgent001",
+        system_prompt: Optional[str] = None,
     ) -> str:
-        """用户 AI 对话，对应 ClawChat.userChat 模式。"""
-        messages = [{"role": "user", "content": f"(ClawMail){user_input}"}]
+        """统一 AI 调用方法，通过 user_id 区分 agent。
+        system_prompt: 可选 system 消息，用于强制输出格式（如 JSON-only）。
+        """
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": f"(ClawMail){user_input}"})
         full_response = ""
         response = self.client.chat.completions.create(
             model=self.model,
