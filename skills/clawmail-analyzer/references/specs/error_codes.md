@@ -148,7 +148,6 @@ Skill 服务暂时不可用。
       "keywords": [],
       "one_line": "处理失败，请重试",
       "brief": "由于技术原因，无法完成邮件分析。请稍后重试或联系支持。",
-      "key_points": ["系统暂时无法处理此邮件"]
     },
     "action_items": [],
     "metadata": {

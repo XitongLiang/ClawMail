@@ -8,6 +8,7 @@ generate_reply.py - 回复草稿生成
 
 import argparse
 import json
+import re
 import sys
 import logging
 from pathlib import Path
@@ -79,11 +80,13 @@ def read_user_profile() -> str:
 
 
 def format_memories(memories: dict) -> str:
+    """格式化全局偏好记忆（排除 contact.* 条目，由 format_sender_profile 单独处理）。"""
     items = memories.get("memories", [])
-    if not items:
+    global_items = [m for m in items if not m.get("memory_key", "").startswith("contact.")]
+    if not global_items:
         return "（无历史记忆）"
     lines = []
-    for m in items:
+    for m in global_items:
         content = m.get("memory_content", {})
         if isinstance(content, dict):
             content = json.dumps(content, ensure_ascii=False)
@@ -91,6 +94,126 @@ def format_memories(memories: dict) -> str:
             f"- [{m.get('memory_type')}] {m.get('memory_key', '全局')}: {content}"
         )
     return "\n".join(lines)
+
+
+def format_sender_profile(memories: dict, sender_email: str) -> str:
+    """从 MemoryBank 提取指定发件人的画像记忆（contact.{email}.* 条目）。"""
+    if not sender_email:
+        return ""
+    items = memories.get("memories", [])
+    prefix = f"contact.{sender_email.lower()}"
+    sender_items = [
+        m for m in items
+        if m.get("memory_key", "").lower().startswith(prefix)
+    ]
+    if not sender_items:
+        return ""
+    lines = []
+    for m in sender_items:
+        content = m.get("memory_content", {})
+        if isinstance(content, dict):
+            content = json.dumps(content, ensure_ascii=False)
+        lines.append(f"- {m.get('memory_key', '')}: {content}")
+    return "\n".join(lines)
+
+
+# ── 正文预处理（与 analyze_email.py 保持一致）──
+
+def strip_quoted_content(body: str) -> str:
+    """移除引用的回复历史和转发头。"""
+    if not body:
+        return body
+    lines = body.splitlines()
+    cleaned = []
+    for i, line in enumerate(lines):
+        if re.match(r"^On\s+", line, re.IGNORECASE):
+            candidate = line.rstrip()
+            if i + 1 < len(lines):
+                candidate = candidate + " " + lines[i + 1].strip()
+            if re.search(r"wrote:\s*$", candidate, re.IGNORECASE):
+                break
+        if re.match(r"^在\s+", line):
+            candidate = line.rstrip()
+            if i + 1 < len(lines):
+                candidate = candidate + " " + lines[i + 1].strip()
+            if re.search(r"写道[：:]\s*$", candidate):
+                break
+        if re.match(r"^-{5,}\s*(Forwarded message|转发的邮件)\s*-{5,}", line, re.IGNORECASE):
+            break
+        if re.match(r"^From:\s+", line) and i > 0 and lines[i - 1].strip() == "":
+            lookahead = "\n".join(lines[i: i + 5])
+            if re.search(r"^(Subject|To|Date|Sent):", lookahead, re.MULTILINE):
+                break
+        if line.startswith(">"):
+            continue
+        cleaned.append(line)
+    result = "\n".join(cleaned).rstrip()
+    if len(result.strip()) < 20 and len(body.strip()) > 20:
+        return body
+    return result
+
+
+_SIG_DELIMITERS = [r"^-- $", r"^—$", r"^_{3,}$", r"^-{3,}$"]
+_SIG_PHRASES = [
+    r"^Best\s+regards", r"^Kind\s+regards", r"^Regards", r"^Sincerely",
+    r"^Thanks", r"^Thank\s+you", r"^Cheers",
+    r"^此致", r"^顺颂商祺", r"^祝好", r"^致敬", r"^谢谢", r"^感谢", r"^多谢",
+    r"^Sent from my (iPhone|iPad|Galaxy|Android)", r"^发自我的", r"^Get Outlook for",
+]
+_SIG_DELIM_RE = re.compile("|".join(_SIG_DELIMITERS), re.MULTILINE)
+_SIG_PHRASE_RE = re.compile("|".join(_SIG_PHRASES), re.IGNORECASE | re.MULTILINE)
+
+
+def strip_signature(body: str) -> str:
+    """移除邮件签名块。"""
+    if not body:
+        return body
+    lines = body.splitlines()
+    total = len(lines)
+    if total < 3:
+        return body
+    search_start = max(0, min(int(total * 0.7), total - 15))
+    cut_at = None
+    for i in range(search_start, total):
+        line = lines[i]
+        if _SIG_DELIM_RE.match(line.rstrip()):
+            cut_at = i
+            break
+        if _SIG_PHRASE_RE.match(line.strip()):
+            cut_at = i
+            break
+    if cut_at is not None:
+        result = "\n".join(lines[:cut_at]).rstrip()
+        if len(result.strip()) < 20:
+            return body
+        return result
+    return body
+
+
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    """在 limit 字符以内找最近段落或句子边界截断。"""
+    if len(text) <= limit:
+        return text
+    chunk = text[:limit]
+    pos = chunk.rfind("\n\n")
+    if pos > limit // 2:
+        return chunk[:pos]
+    for sep in ("。", "！", "？", ".\n", "!\n", "?\n", ". ", "! ", "? "):
+        pos = chunk.rfind(sep)
+        if pos > limit // 2:
+            return chunk[:pos + len(sep)]
+    pos = chunk.rfind("\n")
+    if pos > limit // 2:
+        return chunk[:pos]
+    return chunk
+
+
+def format_ai_context(ai_meta: dict) -> str:
+    """将 AI 分析结果格式化为简洁上下文，仅取 one_line 摘要。"""
+    if not ai_meta:
+        return ""
+    one_line = (ai_meta.get("summary") or {}).get("one_line", "")
+    return f"邮件核心: {one_line}" if one_line else ""
 
 
 def generate_reply(
@@ -102,15 +225,52 @@ def generate_reply(
     # 获取数据
     email = _http_get(f"{CLAWMAIL_API}/emails/{email_id}")
     ai_meta = _http_get(f"{CLAWMAIL_API}/emails/{email_id}/ai-metadata")
-    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}")
+    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}") if account_id else {}
     user_profile = read_user_profile()
+
+    # 获取线程历史（最近 4 封，排除当前邮件）
+    thread_context = ""
+    thread_id = email.get("thread_id")
+    if thread_id:
+        try:
+            thread_data = _http_get(f"{CLAWMAIL_API}/emails/thread/{thread_id}?limit=5")
+            thread_emails = [
+                e for e in thread_data.get("emails", [])
+                if e.get("id") != email_id
+            ][-4:]
+            if thread_emails:
+                lines = []
+                for e in thread_emails:
+                    fa = e.get("from_address") or {}
+                    sender_name = fa.get("name") or fa.get("email", "未知") if isinstance(fa, dict) else str(fa)
+                    date_str = (e.get("received_at") or e.get("date", ""))[:10]
+                    ai = e.get("ai_metadata") or {}
+                    summary = (ai.get("summary") or {}).get("one_line") if isinstance(ai, dict) else ""
+                    summary = summary or (e.get("body_text") or "")[:200]
+                    lines.append(f"- [{date_str}] {sender_name}: {summary}")
+                thread_context = "\n".join(lines)
+        except Exception as e:
+            logger.warning("获取线程历史失败: %s", e)
+
+    # 发件人信息
+    from_addr = email.get("from_address", {})
+    if isinstance(from_addr, dict):
+        sender_email = from_addr.get("email", "")
+        sender = f"{from_addr.get('name', '')} <{sender_email}>".strip(" <>")
+    else:
+        sender_email = ""
+        sender = str(from_addr)
+
+    # 发件人画像（从 MemoryBank 的 contact.* 记忆中提取）
+    sender_profile = format_sender_profile(memories, sender_email)
 
     # 加载 references
     reply_guide = load_reference("prompts/reply_guide.md")
     tone_styles = load_reference("prompts/tone_styles.md")
     memory_text = format_memories(memories)
 
-    # 构建 prompt
+    # 构建 system prompt
+    sender_section = f"\n## 发件人画像\n{sender_profile}\n" if sender_profile else ""
     system_prompt = f"""你是一个邮件回复助手。请根据以下规则生成回复草稿。
 
 ## 用户侧写
@@ -118,7 +278,7 @@ def generate_reply(
 
 ## 用户偏好记忆
 {memory_text}
-
+{sender_section}
 ## 回复规则
 {reply_guide}
 
@@ -127,14 +287,39 @@ def generate_reply(
 
 请直接输出回复内容（纯文本），不要输出 JSON，不要添加标题或标签。"""
 
-    body = email.get("body_text", "")[:4000]
+    # 正文预处理：去除引用历史和签名，再按边界截断
+    body = email.get("body_text", "")
+    body = strip_quoted_content(body)
+    body = strip_signature(body)
+    body = _truncate_at_boundary(body, 4000)
+
+    # AI 分析摘要（避免 LLM 重复理解）
+    ai_context = format_ai_context(ai_meta)
+
+    # 构建 user prompt
     user_prompt = f"""原始邮件：
 主题: {email.get('subject', '')}
-发件人: {json.dumps(email.get('from_address', {}), ensure_ascii=False)}
+发件人: {sender}
 正文:
 {body}
-
+"""
+    if ai_context:
+        user_prompt += f"""
+## AI 已分析摘要（供参考）
+{ai_context}
+"""
+    if thread_context:
+        user_prompt += f"""
+## 对话历史（最近几封）
+{thread_context}
+"""
+    user_prompt += f"""
 ---
+请先判断：
+1. 原邮件的意图类型（确认请求/信息请求/行动请求/问题投诉/通知FYI/跟进催促）
+2. 发件人语气级别（正式/礼貌/轻松）
+
+然后生成回复：
 用户选择的回复立场: {stance}
 目标语气: {tone}"""
     if user_notes:

@@ -163,9 +163,9 @@ CREATE TABLE email_ai_metadata (
     -- 统一提取结果（v2: 合并为单列）
     -- [DEPRECATED] keywords, summary_one_line, summary_brief, summary_key_points, outline
     --   已合并为下方 summary 列，旧列在迁移后删除
-    summary TEXT,                           -- JSON: {"keywords": [...], "one_line": "...", "brief": "...", "key_points": [...]}
+    summary TEXT,                           -- JSON: {"keywords": [...], "one_line": "...", "brief": "..."}
     categories TEXT,                        -- JSON分类标签数组（规范值见 tech_spec.md 第3节）
-    sentiment TEXT,                         -- urgent/positive/negative/neutral
+    sentiment TEXT,                         -- positive/negative/neutral
     suggested_reply TEXT,                   -- AI生成的建议回复草稿（可为空）
     is_spam INTEGER DEFAULT NULL,           -- 1=垃圾邮件，0=正常
     action_items TEXT,                      -- JSON行动项数组
@@ -330,11 +330,14 @@ CREATE TABLE activity_logs (
 -- ============================================
 -- 10. 用户偏好记忆表（MemSkill 个性化）
 -- ============================================
+-- 写入来源有两处：
+--   ① analyze_email.py：contact.* facts 分析时直接写入（memory_type = contact）
+--   ② extract_preference.py：用户修正行为触发，写入/更新/删除各类偏好记忆
 CREATE TABLE IF NOT EXISTS user_preference_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_account_id TEXT NOT NULL,
-    memory_type TEXT NOT NULL,           -- email_analysis / reply_draft / compose / polish
-    memory_key TEXT,                     -- 关联键（如发件人地址）
+    memory_type TEXT NOT NULL,           -- contact / email_analysis / reply_draft / compose / polish
+    memory_key TEXT,                     -- 关联键（contact.* 格式如 contact.bob@co.com.direction）
     memory_content TEXT NOT NULL,        -- JSON: 记忆内容
     confidence_score REAL DEFAULT 0.5,
     evidence_count INTEGER DEFAULT 1,
@@ -361,12 +364,14 @@ CREATE TABLE IF NOT EXISTS skill_bank (
 
 -- ============================================
 -- 12. Pending Facts（Skill-Driven 事实累积）
+-- 注意：contact.* 类 facts 不经过此表，直接写入 user_preference_memory
+-- 此表仅存储 career / org / project 等需要积累确认的用户侧写事实
 -- ============================================
 CREATE TABLE IF NOT EXISTS pending_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_account_id TEXT NOT NULL,
-    fact_key TEXT NOT NULL,              -- 事实唯一标识，如 "职业.职位", "联系人.Alice.关系"
-    fact_category TEXT NOT NULL,         -- career, contact, organization, project, writing_habit, communication_style
+    fact_key TEXT NOT NULL,              -- 事实唯一标识，如 "career.position", "org.report_to"
+    fact_category TEXT NOT NULL,         -- career, organization, project（contact.* 已分流，不在此）
     fact_content TEXT NOT NULL,          -- 事实内容（纯文本描述）
     confidence REAL NOT NULL DEFAULT 0.0,       -- 当前累积置信度 0.0-1.0
     evidence_count INTEGER NOT NULL DEFAULT 1,  -- 被多少封邮件/事件佐证
@@ -516,8 +521,8 @@ class Email:
 @dataclass
 class EmailAIMetadata:
     email_id: str
-    summary: Optional[Dict] = None          # JSON: {"keywords": [...], "one_line": "...", "brief": "...", "key_points": [...]}
-    # Backward-compatible properties: .keywords, .one_line, .brief, .key_points
+    summary: Optional[Dict] = None          # JSON: {"keywords": [...], "one_line": "...", "brief": "..."}
+    # Backward-compatible properties: .keywords, .one_line, .brief
     #   each reads from summary dict; setter updates the dict in-place
     categories: List[str] = None
     sentiment: Optional[str] = None
@@ -1122,7 +1127,6 @@ ai_result = EmailAIMetadata(
         "keywords": ["Q4项目", "延期", "进度"],
         "one_line": "张三申请项目延期两周",
         "brief": "Q4项目因供应商延迟申请延期，预计影响...",
-        "key_points": ["项目已完成80%", "预计延期两周", "供应商延迟为主因"]
     },
     categories=["紧急", "项目A"],
     ai_status="processed",

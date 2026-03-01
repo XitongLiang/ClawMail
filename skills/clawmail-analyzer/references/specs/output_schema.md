@@ -10,7 +10,7 @@
   "properties": {
     "summary": {
       "type": "object",
-      "required": ["keywords", "one_line", "brief", "key_points"],
+      "required": ["keywords", "one_line", "brief"],
       "properties": {
         "keywords": {
           "type": "array",
@@ -19,13 +19,7 @@
           "maxItems": 8
         },
         "one_line": {"type": "string", "maxLength": 20},
-        "brief": {"type": "string"},
-        "key_points": {
-          "type": "array",
-          "items": {"type": "string"},
-          "minItems": 0,
-          "maxItems": 5
-        }
+        "brief": {"type": "string"}
       }
     },
     "action_items": {
@@ -54,7 +48,7 @@
           "items": {"type": "string"},
           "maxItems": 4
         },
-        "sentiment": {"enum": ["urgent", "positive", "negative", "neutral"]},
+        "sentiment": {"enum": ["positive", "negative", "neutral"]},
         "language": {"enum": ["zh", "en", "ja"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "is_spam": {"type": "boolean"},
@@ -97,11 +91,6 @@
     "keywords": ["Q4报告", "张总", "周五截止", "财务数据"],
     "one_line": "张总要求周五前提交Q4财务报告",
     "brief": "张总邮件要求各部门在本周五（3月1日）前提交Q4季度财务报告。\n报告需包含收入、支出、利润三大板块数据。\n请确保数据准确，并抄送财务部审核。",
-    "key_points": [
-      "周五（3月1日）为报告提交截止日期",
-      "报告需包含收入、支出、利润三大板块",
-      "完成后需抄送财务部审核"
-    ]
   },
   "action_items": [
     {
@@ -125,7 +114,7 @@
   ],
   "metadata": {
     "category": ["urgent", "pending_reply", "项目:Q4财务"],
-    "sentiment": "urgent",
+    "sentiment": "neutral",
     "language": "zh",
     "confidence": 0.95,
     "is_spam": false,
@@ -159,7 +148,6 @@
 | keywords | array | 3-8个 | 最具代表性的关键词 |
 | one_line | string | 20字以内 | 一句话核心概括 |
 | brief | string | 3-5行 | 标准摘要 |
-| key_points | array | 最多5个 | 关键要点列表 |
 
 ### action_items
 | 字段 | 类型 | 说明 |
@@ -178,7 +166,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | category | array | 分类标签，最多4个 |
-| sentiment | enum | urgent/positive/negative/neutral |
+| sentiment | enum | positive/negative/neutral |
 | language | enum | zh/en/ja |
 | confidence | number | 0.0-1.0 置信度 |
 | is_spam | boolean | 是否为垃圾邮件 |

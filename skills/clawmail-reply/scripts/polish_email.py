@@ -98,7 +98,7 @@ def polish_email(body: str, tone: str, account_id: str) -> str:
     logger.info("润色邮件: tone=%s body_len=%d", tone, len(body))
 
     # 获取用户记忆
-    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}")
+    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}") if account_id else {}
     user_profile = read_user_profile()
 
     # 加载 references

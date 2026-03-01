@@ -1,6 +1,6 @@
 """
-UserMemory / Skill 域模型
-MemSkill 个性化系统的核心数据结构。
+UserMemory 域模型
+用户偏好记忆数据结构，由 clawmail-executor skill 写入，analyzer skill 读取注入 prompt。
 """
 
 from dataclasses import dataclass
@@ -28,16 +28,3 @@ class UserMemory:
     # 时间
     last_updated: Optional[datetime] = None
     created_at: Optional[datetime] = None
-
-
-@dataclass
-class Skill:
-    """记忆提取技能定义。"""
-    id: str                          # UUID
-    skill_name: str                  # 唯一名称，如 extract_sender_importance
-    skill_type: str                  # insert | update | delete
-    description: str                 # 简短描述
-    instruction_template: str        # 执行器使用的指令模板
-    version: int = 1
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None

@@ -38,7 +38,7 @@ def get_ai_metadata(email_id):
         "keywords": json.loads(row["keywords"]) if row["keywords"] else None,
         "summary_one_line": row["summary_one_line"],
         "summary_brief": row["summary_brief"],
-        "summary_key_points": json.loads(row["summary_key_points"]) if row["summary_key_points"] else None,
+
         "outline": json.loads(row["outline"]) if row["outline"] else None,
         "categories": json.loads(row["categories"]) if row["categories"] else None,
         "sentiment": row["sentiment"],
@@ -90,14 +90,6 @@ def format_metadata(metadata):
         lines.append("Brief Summary:")
         lines.append("-" * 60)
         lines.append(metadata["summary_brief"])
-    
-    if metadata["summary_key_points"]:
-        lines.append("")
-        lines.append("-" * 60)
-        lines.append("Key Points:")
-        lines.append("-" * 60)
-        for i, point in enumerate(metadata["summary_key_points"], 1):
-            lines.append(f"  {i}. {point}")
     
     if metadata["suggested_reply"]:
         lines.append("")

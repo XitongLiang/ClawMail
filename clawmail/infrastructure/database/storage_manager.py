@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Any
 
 from clawmail.domain.models.account import Account
 from clawmail.domain.models.email import Email, EmailAIMetadata
-from clawmail.domain.models.memory import UserMemory, Skill
+from clawmail.domain.models.memory import UserMemory
 from clawmail.domain.models.task import Task
 
 
@@ -103,10 +103,10 @@ CREATE TABLE IF NOT EXISTS email_ai_metadata (
     summary_brief TEXT,             -- 已废弃，保留兼容
     summary_key_points TEXT,        -- 已废弃，保留兼容
     outline TEXT,                   -- 已废弃，保留兼容
-    summary TEXT,                   -- JSON: {keywords, one_line, brief, key_points}
+    summary TEXT,                   -- JSON: {keywords, one_line, brief}
     categories TEXT,
     sentiment TEXT
-        CHECK(sentiment IN ('urgent', 'positive', 'negative', 'neutral') OR sentiment IS NULL),
+        CHECK(sentiment IN ('positive', 'negative', 'neutral') OR sentiment IS NULL),
     suggested_reply TEXT,
     is_spam INTEGER DEFAULT NULL,
     action_items TEXT,
@@ -570,7 +570,7 @@ class ClawDB:
     def get_emails_by_folder_sorted_by_importance(
         self, account_id: str, folder: str = "INBOX", limit: int = 100
     ) -> List[Email]:
-        """按重要性分数降序排列邮件（已完成沉底，无分数的排最后）。"""
+        """未读邮件按重要性排前，已读按时间排后（已完成沉底，置顶优先）。"""
         with self.get_conn() as conn:
             rows = conn.execute(
                 """SELECT e.* FROM emails e
@@ -578,8 +578,10 @@ class ClawDB:
                    WHERE e.account_id = ? AND e.folder = ?
                    ORDER BY CASE WHEN e.flag_status = 'completed' THEN 1 ELSE 0 END,
                             e.pinned DESC,
-                            CASE WHEN m.importance_score IS NULL THEN 1 ELSE 0 END,
-                            m.importance_score DESC
+                            CASE WHEN e.read_status = 'unread' THEN 0 ELSE 1 END,
+                            CASE WHEN e.read_status = 'unread' AND m.importance_score IS NULL THEN 1 ELSE 0 END,
+                            CASE WHEN e.read_status = 'unread' THEN m.importance_score END DESC,
+                            e.received_at DESC
                    LIMIT ?""",
                 (account_id, folder, limit),
             ).fetchall()
@@ -1262,7 +1264,7 @@ class ClawDB:
                 """SELECT e.id FROM emails e
                    LEFT JOIN email_ai_metadata m ON e.id = m.email_id
                    WHERE e.account_id = ?
-                     AND e.folder NOT IN ('草稿箱', '已删除', '已发送')
+                     AND e.folder NOT IN ('草稿箱', '已删除')
                      AND (m.email_id IS NULL
                           OR m.ai_status IN ('unprocessed', 'failed'))
                    ORDER BY e.received_at DESC
@@ -1495,64 +1497,6 @@ class ClawDB:
                     d[dt_field] = None
         return UserMemory(**{k: v for k, v in d.items()
                             if k in UserMemory.__dataclass_fields__})
-
-    # --------------------------------------------------------
-    # MemSkill: skill_bank
-    # --------------------------------------------------------
-
-    def save_skill(self, skill: Skill) -> None:
-        """保存或更新技能定义。"""
-        with self.get_conn() as conn:
-            conn.execute(
-                """INSERT INTO skill_bank
-                   (id, skill_name, skill_type, description,
-                    instruction_template, version, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                       instruction_template = excluded.instruction_template,
-                       version = excluded.version,
-                       updated_at = excluded.updated_at""",
-                (
-                    skill.id,
-                    skill.skill_name,
-                    skill.skill_type,
-                    skill.description,
-                    skill.instruction_template,
-                    skill.version,
-                    skill.created_at.isoformat()
-                    if skill.created_at else datetime.utcnow().isoformat(),
-                    datetime.utcnow().isoformat(),
-                ),
-            )
-            conn.commit()
-
-    def get_all_skills(self) -> List[Skill]:
-        """返回所有技能定义。"""
-        with self.get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM skill_bank ORDER BY skill_name"
-            ).fetchall()
-        return [self._row_to_skill(r) for r in rows]
-
-    def get_skill(self, skill_name: str) -> Optional[Skill]:
-        """按名称查询技能。"""
-        with self.get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM skill_bank WHERE skill_name = ?",
-                (skill_name,),
-            ).fetchone()
-        return self._row_to_skill(row) if row else None
-
-    def _row_to_skill(self, row: sqlite3.Row) -> Skill:
-        d = dict(row)
-        for dt_field in ("created_at", "updated_at"):
-            if d.get(dt_field):
-                try:
-                    d[dt_field] = datetime.fromisoformat(d[dt_field])
-                except (ValueError, TypeError):
-                    d[dt_field] = None
-        return Skill(**{k: v for k, v in d.items()
-                        if k in Skill.__dataclass_fields__})
 
     # --------------------------------------------------------
     # Skill-Driven: pending_facts
@@ -1813,7 +1757,7 @@ class ClawDB:
                    FROM emails e
                    LEFT JOIN email_ai_metadata m ON e.id = m.email_id
                    WHERE e.account_id = ?
-                     AND e.folder NOT IN ('草稿箱', '已删除', '已发送')
+                     AND e.folder NOT IN ('草稿箱', '已删除')
                      AND (m.email_id IS NULL
                           OR m.ai_status IN ('unprocessed', 'failed'))
                    ORDER BY e.received_at DESC

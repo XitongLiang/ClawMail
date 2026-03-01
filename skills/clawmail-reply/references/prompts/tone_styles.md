@@ -1,13 +1,19 @@
 # 语气风格定义
 
-| 风格 | 字数范围 | 特征 |
-|------|---------|------|
-| 正式 | 150-250字 | 完整称呼、正式用语、完整段落、礼貌结尾 |
-| 礼貌 | 100-200字 | 称呼 + 正文 + 简短结尾，用语得体但不过度正式 |
-| 轻松 | 50-100字 | 简短称呼或无称呼，口语化表达，可用感叹号 |
-| 简短 | 30-80字 | 直奔主题，无称呼无结尾，只说关键内容 |
+## 风格总览
 
-## 风格示例
+| 风格 | 字数参考 | 特征 |
+|------|---------|------|
+| 正式 | 120-250字 | 完整称呼、正式用语、完整段落、礼貌结尾 |
+| 礼貌 | 80-180字 | 称呼 + 正文 + 简短结尾，得体但不过度正式 |
+| 轻松 | 40-100字 | 简短称呼或无称呼，口语化表达 |
+| 简短 | 20-60字 | 直奔主题，无称呼无结尾，只说关键内容 |
+
+> **注意**：字数是参考范围，不是硬限制。简单的确认不需要凑够 120 字；复杂的回复不应为了"简短"而漏掉关键信息。内容完整优先，字数其次。
+
+---
+
+## 风格示例（中文）
 
 ### 正式
 ```
@@ -15,14 +21,71 @@
 
 感谢您发送Q4项目进度汇报的会议邀请。
 
-我确认将于本周五下午2点准时参加会议。关于团队进度报告PPT，我将在周四前完成准备并提前发送给您预览。如有其他需要提前准备的材料，请告知。
-
-期待会议上的交流。
+我确认将于本周五下午2点准时参加会议。关于团队进度报告PPT，我将在周四前完成准备并提前发送给您预览。如有其他需要提前准备的材料，请于周三前告知。
 
 此致
 ```
 
+### 礼貌
+```
+王总好，
+
+周五下午2点的会议我可以参加，PPT我会在周四前准备好发给您。
+
+有其他需要准备的，请提前告知。
+```
+
+### 轻松
+```
+没问题，周五2点见！PPT周四前搞定发你。
+```
+
 ### 简短
 ```
-收到，周五准时参加。PPT周四前准备好。
+周五2点确认参加，PPT周四前发。
 ```
+
+---
+
+## 风格示例（英文）
+
+### Formal
+```
+Dear Mr. Wang,
+
+Thank you for the meeting invitation regarding the Q4 project progress review.
+
+I confirm my attendance on Friday at 2:00 PM. I will have the team progress presentation ready and send it to you by Thursday for your review. Please let me know by Wednesday if there are any additional materials I should prepare.
+
+Best regards,
+```
+
+### Polite
+```
+Hi Mr. Wang,
+
+I'll be there Friday at 2 PM. I'll get the presentation ready and send it over by Thursday.
+
+Let me know if you need anything else beforehand.
+
+Best,
+```
+
+### Casual
+```
+Works for me — see you Friday at 2! Slides will be ready by Thursday.
+```
+
+### Brief
+```
+Friday 2PM confirmed. Slides by Thursday.
+```
+
+---
+
+## 语言匹配规则
+
+- 原邮件中文 → 回复中文
+- 原邮件英文 → 回复英文
+- 原邮件中英混用 → 跟随主体语言
+- 不在中文邮件里夹杂英文（行业惯用缩写除外，如 CEO、PPT、KPI）

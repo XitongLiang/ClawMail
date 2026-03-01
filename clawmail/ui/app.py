@@ -25,9 +25,9 @@ from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from clawmail.ui.theme import get_theme
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QSplitter, QStatusBar, QStyle, QStyledItemDelegate, QTextBrowser, QTextEdit,
+    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QSplitter, QStatusBar, QStyle, QStyledItemDelegate, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -112,7 +112,7 @@ class EmailListDelegate(QStyledItemDelegate):
             _theme = get_theme()
             line_color = _theme.dim_color()
             line_color.setAlpha(80)
-            label = "已完成"
+            label = index.data(Qt.ItemDataRole.UserRole + 14) or "已完成"
             f_sep = QFont(option.font)
             f_sep.setBold(False)
             pt = f_sep.pointSize()
@@ -345,11 +345,6 @@ class ClawMailApp(QMainWindow):
         self._ai_bridge = None
         self._ai_processing_total = 0   # 当前批次总邮件数
         self._ai_processing_done = 0    # 当前批次已完成数
-        # MemSkill 个性化组件
-        self._memory_bank = None
-        self._skill_bank = None
-        self._executor = None
-        self._designer = None
         self._current_folder = "INBOX"
         self._sort_by_importance: bool = False
         self._current_category: Optional[str] = None  # AI 分类筛选
@@ -390,6 +385,10 @@ class ClawMailApp(QMainWindow):
             self._save_config({"ai_chat_mode": mode})
 
         self._ai_chat_mode = mode
+
+        # Load importance sort preference
+        self._sort_by_importance = config.get("sort_by_importance", False)
+        self._apply_drag_drop_mode()
 
     # ----------------------------------------------------------------
     # UI 初始化
@@ -611,28 +610,6 @@ class ClawMailApp(QMainWindow):
         _fp_row2.addWidget(_fp_reset)
         _fp_vbox.addLayout(_fp_row2)
         _ep_vbox.addWidget(self._filter_panel)
-
-        # 重要性排序开关
-        _sort_row = QWidget()
-        _sort_row.setStyleSheet("background:palette(button); border-bottom:1px solid palette(mid);")
-        _sort_h = QHBoxLayout(_sort_row)
-        _sort_h.setContentsMargins(8, 2, 8, 2)
-        _sort_h.setSpacing(6)
-        _sort_h.addStretch()
-        _sort_lbl = QLabel("按重要性排序")
-        _sort_lbl.setStyleSheet("font-size:11px;")
-        _sort_h.addWidget(_sort_lbl)
-        self._importance_sort_toggle = QPushButton("关")
-        self._importance_sort_toggle.setCheckable(True)
-        self._importance_sort_toggle.setFixedSize(32, 18)
-        self._importance_sort_toggle.setStyleSheet(
-            "QPushButton{border:1px solid palette(mid);border-radius:9px;"
-            "background:palette(midlight);font-size:10px;}"
-            "QPushButton:checked{background:#5b86e5;color:#fff;border-color:#5b86e5;}"
-        )
-        self._importance_sort_toggle.toggled.connect(self._on_importance_sort_toggle)
-        _sort_h.addWidget(self._importance_sort_toggle)
-        _ep_vbox.addWidget(_sort_row)
 
         _ep_vbox.addWidget(self._email_list, stretch=1)
         splitter.addWidget(_email_panel)
@@ -1034,9 +1011,6 @@ class ClawMailApp(QMainWindow):
         sync_svc = SyncService(self._db, self._cred)
         self.set_sync_service(sync_svc, account_id=account_id)
 
-        # MemSkill 个性化组件初始化
-        self._init_memskill()
-
         if self._db:
             ai_processor = AIProcessor(
                 self._db.data_dir,
@@ -1240,23 +1214,23 @@ class ClawMailApp(QMainWindow):
         if hasattr(self, "_filter_flag_combo"):
             self._filter_flag_combo.setCurrentIndex(0)
 
-    def _on_importance_sort_toggle(self, checked: bool) -> None:
-        self._sort_by_importance = checked
-        self._importance_sort_toggle.setText("开" if checked else "关")
-        # 开启/关闭拖拽排序
-        if checked:
+    def _apply_drag_drop_mode(self) -> None:
+        """根据 _sort_by_importance 开启/关闭拖拽排序。"""
+        if self._sort_by_importance:
             self._email_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
             self._email_list.setDefaultDropAction(Qt.DropAction.MoveAction)
             self._email_list.setAutoScroll(True)
             self._email_list.setAutoScrollMargin(40)
-            self._email_list.model().rowsMoved.connect(self._on_email_rows_moved)
+            try:
+                self._email_list.model().rowsMoved.connect(self._on_email_rows_moved)
+            except RuntimeError:
+                pass
         else:
             self._email_list.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
             try:
                 self._email_list.model().rowsMoved.disconnect(self._on_email_rows_moved)
             except (TypeError, RuntimeError):
                 pass
-        self.refresh_email_list(self._current_folder)
 
     def _on_category_changed(self, current: QListWidgetItem, _prev):
         if not current:
@@ -1380,7 +1354,7 @@ class ClawMailApp(QMainWindow):
             f"{_add_todo_btn}"
             f"</div>"
         )
-        # AI 摘要面板（brief + key_points + 分类标签）
+        # AI 摘要面板（brief + 分类标签）
         ai_panel_html = ""
         if self._db:
             try:
@@ -1715,6 +1689,19 @@ class ClawMailApp(QMainWindow):
         )
         form.addRow("聊天模式：", mode_combo)
 
+        # ---- 邮件排序 ----
+        sort_section_label = QLabel("邮件排序")
+        sort_section_label.setStyleSheet(
+            f"color:{get_theme().settings_section_color()}; font-weight:bold; font-size:11px; "
+            f"padding-top:10px; border-top:1px solid {get_theme().settings_section_border()}; margin-top:6px;"
+        )
+        form.addRow(sort_section_label)
+
+        importance_sort_cb = QCheckBox("按重要性排序（未读按重要性排前，已读排后）")
+        importance_sort_cb.setChecked(self._sort_by_importance)
+        importance_sort_cb.setStyleSheet("font-size:12px;")
+        form.addRow(importance_sort_cb)
+
         # ---- AI 分析 ----
         ai_section_label = QLabel("AI 分析")
         ai_section_label.setStyleSheet(
@@ -1776,6 +1763,14 @@ class ClawMailApp(QMainWindow):
             self._ai_chat_mode = new_mode
             self._save_config({"ai_chat_mode": new_mode})
             self._update_agent_indicator()  # Update chat panel indicator
+
+        # 保存重要性排序设置
+        new_sort = importance_sort_cb.isChecked()
+        if new_sort != self._sort_by_importance:
+            self._sort_by_importance = new_sort
+            self._save_config({"sort_by_importance": new_sort})
+            self._apply_drag_drop_mode()
+            self.refresh_email_list(self._current_folder)
 
         new_token = token_edit.text().strip()
         if not new_token:
@@ -2239,12 +2234,6 @@ class ClawMailApp(QMainWindow):
                 f"<div style='margin-bottom:6px;color:{_text};font-size:13px'>"
                 f"{brief_esc}</div>"
             )
-        if meta.summary_key_points:
-            items = "".join(
-                f"<li style='margin:2px 0;color:{_text}'>{_html_mod.escape(p)}</li>"
-                for p in meta.summary_key_points
-            )
-            parts.append(f"<ul style='margin:0 0 6px 16px;padding:0;color:{_text}'>{items}</ul>")
         if meta.categories:
             # Use vibrant accent colors for badges; "subscription" (#757575) gets a brighter
             # variant in dark mode for legibility.
@@ -2472,178 +2461,50 @@ class ClawMailApp(QMainWindow):
         # 手动输入时刷新列表（拖拽不需要，位置已由用户决定）
         if mode == "manual_input" and self._sort_by_importance:
             self.refresh_email_list(self._current_folder)
-        # MemSkill: 触发 Executor 提取用户偏好记忆
-        if self._executor and self._current_account_id:
-            asyncio.ensure_future(self._run_executor_importance(
-                email_id, old_score, new_score
+        # Executor skill: 提取用户重要性偏好记忆
+        if self._current_account_id and abs(old_score - new_score) >= 10:
+            asyncio.ensure_future(self._run_executor_skill(
+                "importance_score",
+                {"original_score": old_score, "user_score": new_score},
+                email_id,
             ))
 
     # ----------------------------------------------------------------
-    # MemSkill 初始化与 Executor 调用
+    # Executor Skill 调用（subprocess）
     # ----------------------------------------------------------------
 
-    def _init_memskill(self) -> None:
-        """初始化 MemSkill 个性化组件（MemoryBank / SkillBank / Executor / Designer）。"""
-        if not self._db or not self._ai_bridge:
-            return
-        try:
-            from clawmail.infrastructure.personalization.memory_bank import MemoryBank
-            from clawmail.infrastructure.personalization.skill_bank import SkillBank
-            from clawmail.infrastructure.personalization.executor import Executor
-            from clawmail.infrastructure.personalization.designer import Designer
-
-            feedback_dir = self._db.data_dir / "feedback"
-            self._memory_bank = MemoryBank(self._db)
-            self._skill_bank = SkillBank(self._db)
-            self._executor = Executor(
-                self._ai_bridge, self._memory_bank, self._skill_bank,
-                log_dir=feedback_dir,
-            )
-            self._designer = Designer(
-                self._ai_bridge, self._skill_bank, feedback_dir,
-            )
-            print("[MemSkill] 个性化组件初始化完成（含 Designer）")
-        except Exception as e:
-            print(f"[MemSkill] 初始化失败: {e}")
-            self._memory_bank = None
-            self._skill_bank = None
-            self._executor = None
-            self._designer = None
-
-    async def _run_executor_importance(
-        self, email_id: str, old_score: int, new_score: int
+    async def _run_executor_skill(
+        self, feedback_type: str, feedback_data: dict, email_id: str
     ) -> None:
-        """异步运行 Executor 处理重要性修正。"""
-        if not self._executor or not self._current_account_id:
+        """通过 clawmail-executor skill 脚本提取用户偏好记忆。"""
+        if not self._current_account_id:
             return
-        email = self._db.get_email(email_id) if self._db else None
-        if not email:
-            return
-        from_info = email.from_address or {}
-        sender_email = from_info.get("email", "")
-        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
-        email_data = {
-            "subject": email.subject or "",
-            "from": from_info,
-            "body_text": (email.body_text or "")[:1000],
-        }
         try:
+            import subprocess, sys, json as _json
+            from clawmail.infrastructure.ai.ai_processor import EXECUTOR_SCRIPT, GATEWAY_TOKEN
+            cmd = [
+                sys.executable, str(EXECUTOR_SCRIPT),
+                "--feedback-type", feedback_type,
+                "--feedback-data", _json.dumps(feedback_data, ensure_ascii=False),
+                "--email-id", email_id,
+                "--account-id", self._current_account_id,
+            ]
+            if GATEWAY_TOKEN:
+                cmd += ["--llm-token", GATEWAY_TOKEN]
             loop = asyncio.get_event_loop()
-            count = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 None,
-                self._executor.execute_importance_feedback,
-                self._current_account_id,
-                email_data,
-                old_score,
-                new_score,
-                sender_email,
-                sender_domain,
+                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
             )
-            if count:
-                print(f"[MemSkill] 重要性反馈 → {count} 条记忆更新")
+            if result.returncode == 0 and result.stdout.strip():
+                data = _json.loads(result.stdout)
+                count = data.get("operations_applied", 0)
+                if count:
+                    print(f"[Executor] {feedback_type} → {count} 条记忆更新")
+            elif result.returncode != 0:
+                print(f"[Executor] Skill 失败: {result.stderr[:200]}")
         except Exception as e:
-            print(f"[MemSkill] Executor 重要性处理失败: {e}")
-        self._check_designer_trigger()
-
-    async def _run_executor_summary(
-        self, email_id: str, original_summary: dict,
-        reasons: list, user_comment: str = None
-    ) -> None:
-        """异步运行 Executor 处理摘要差评反馈。"""
-        if not self._executor or not self._current_account_id:
-            return
-        email = self._db.get_email(email_id) if self._db else None
-        if not email:
-            return
-        from_info = email.from_address or {}
-        sender_email = from_info.get("email", "")
-        sender_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
-        email_data = {
-            "subject": email.subject or "",
-            "from": from_info,
-            "body_text": (email.body_text or "")[:1000],
-        }
-        try:
-            loop = asyncio.get_event_loop()
-            count = await loop.run_in_executor(
-                None,
-                self._executor.execute_summary_feedback,
-                self._current_account_id,
-                email_data,
-                original_summary,
-                reasons,
-                user_comment,
-                sender_email,
-                sender_domain,
-            )
-            if count:
-                print(f"[MemSkill] 摘要反馈 → {count} 条记忆更新")
-        except Exception as e:
-            print(f"[MemSkill] Executor 摘要处理失败: {e}")
-        self._check_designer_trigger()
-
-    async def _run_executor_reply(
-        self, email_id: str, ai_draft: str, user_final: str,
-        similarity_ratio: float, stance: str = None, tone: str = None
-    ) -> None:
-        """异步运行 Executor 处理回复草稿隐式反馈。"""
-        if not self._executor or not self._current_account_id:
-            return
-        email = self._db.get_email(email_id) if self._db else None
-        if not email:
-            return
-        from_info = email.from_address or {}
-        recipient_email = from_info.get("email", "")
-        email_data = {
-            "subject": email.subject or "",
-            "from": from_info,
-            "body_text": (email.body_text or "")[:1000],
-        }
-        try:
-            loop = asyncio.get_event_loop()
-            count = await loop.run_in_executor(
-                None,
-                self._executor.execute_reply_feedback,
-                self._current_account_id,
-                email_data,
-                ai_draft,
-                user_final,
-                similarity_ratio,
-                stance,
-                tone,
-                recipient_email,
-            )
-            if count:
-                print(f"[MemSkill] 回复反馈 → {count} 条记忆更新")
-        except Exception as e:
-            print(f"[MemSkill] Executor 回复处理失败: {e}")
-        self._check_designer_trigger()
-
-    def _check_designer_trigger(self) -> None:
-        """Executor 执行后检查是否触发 Designer 技能演化。"""
-        if not self._designer:
-            return
-        try:
-            if self._designer.should_run():
-                asyncio.ensure_future(self._run_designer())
-        except Exception as e:
-            print(f"[Designer] 触发检查失败: {e}")
-
-    async def _run_designer(self) -> None:
-        """异步运行 Designer 技能演化流程。"""
-        print("[Designer] 开始技能演化...")
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self._designer.run)
-            changes = result.get("changes", [])
-            if changes:
-                print(f"[Designer] 技能演化完成: {len(changes)} 项变更")
-                for c in changes:
-                    print(f"  - {c.get('action', '?')}: {c.get('skill_name', '?')}")
-            else:
-                print(f"[Designer] 分析完成，无需变更")
-        except Exception as e:
-            print(f"[Designer] 技能演化失败: {e}")
+            print(f"[Executor] 执行失败: {e}")
 
     # ----------------------------------------------------------------
     # 摘要反馈
@@ -2706,10 +2567,12 @@ class ClawMailApp(QMainWindow):
         self._status_bar.showMessage(
             f"{'👍' if rating == 'good' else '👎'} 感谢反馈", 2500
         )
-        # MemSkill: 差评时触发 Executor 提取摘要偏好
-        if rating == "bad" and self._executor and self._current_account_id:
-            asyncio.ensure_future(self._run_executor_summary(
-                email_id, summary, reasons, user_comment
+        # Executor skill: 差评时提取摘要偏好
+        if rating == "bad" and self._current_account_id:
+            asyncio.ensure_future(self._run_executor_skill(
+                "summary_rating",
+                {"summary": summary, "reasons": reasons, "comment": user_comment},
+                email_id,
             ))
 
     def _on_email_rows_moved(self, _parent, start, _end, _dest, dest_row) -> None:
@@ -2740,7 +2603,6 @@ class ClawMailApp(QMainWindow):
                     d["keywords"] = m.keywords
                     d["one_line"] = m.summary_one_line
                     d["brief"] = m.summary_brief
-                    d["key_points"] = m.summary_key_points
             return d
 
         ctx = {}
@@ -2865,16 +2727,28 @@ class ClawMailApp(QMainWindow):
             emails = self._db.get_emails_by_folder(
                 self._current_account_id, folder, limit=100
             )
-        separator_added = False
+        sep_read_added = False
+        sep_completed_added = False
         for email in emails:
-            # 重要性排序模式：在第一封已完成邮件前插入分隔符
-            if (self._sort_by_importance and not separator_added
+            # 重要性排序模式：在未读/已读分界处插入分隔符
+            if (self._sort_by_importance and not sep_read_added
+                    and email.read_status != "unread"
+                    and email.flag_status != "completed"):
+                sep = QListWidgetItem()
+                sep.setData(Qt.ItemDataRole.UserRole, "__separator__")
+                sep.setData(Qt.ItemDataRole.UserRole + 14, "已读邮件")
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)
+                self._email_list.addItem(sep)
+                sep_read_added = True
+            # 重要性排序模式：在已完成邮件前插入分隔符
+            if (self._sort_by_importance and not sep_completed_added
                     and email.flag_status == "completed"):
                 sep = QListWidgetItem()
                 sep.setData(Qt.ItemDataRole.UserRole, "__separator__")
-                sep.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选、不可拖拽
+                sep.setData(Qt.ItemDataRole.UserRole + 14, "已完成")
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)
                 self._email_list.addItem(sep)
-                separator_added = True
+                sep_completed_added = True
             self._append_email_item(email)
         self._refresh_folder_counts()
 
@@ -3317,13 +3191,6 @@ class ClawMailApp(QMainWindow):
             if it and it.data(Qt.ItemDataRole.UserRole) == email_id:
                 self._email_list.setCurrentItem(it)
                 self._email_list.scrollToItem(it)
-                return
-
-    def _navigate_to_email(self, email_id: str) -> None:
-        for i in range(self._email_list.count()):
-            it = self._email_list.item(i)
-            if it and it.data(Qt.ItemDataRole.UserRole) == email_id:
-                self._email_list.setCurrentItem(it)
                 return
 
     def _on_todo_add(self) -> None:

@@ -36,26 +36,37 @@
 
 ### 判断规则
 
+**优先级：历史记忆 > 职位关键词推测**
+
+1. **记忆优先**：如果 system prompt 中的"发件人画像（历史记忆）"有此发件人的 `contact.{email}.relationship` 或 `contact.{email}.direction` 记录，**优先依据记忆中的关系类型打分**：
+   - 上司 / 直接上级 / `inbound_command` 关系 → 70-95（结合过往邮件紧迫性调整）
+   - 平级同事 / `bidirectional` 关系 → 40-60
+   - 下属 / `outbound_report` 关系 → 30-50
+   - 外部客户 / 合作方（非命令关系）→ 50-70
+   - 纯信息推送 / `inbound_info` → 10-30
+
+2. **无记忆时，用职位关键词推测**：
+
 ```python
 def score_sender(from_address, user_context):
     email = from_address.get("email", "")
     name = from_address.get("name", "")
-    
+
     # VIP列表匹配
     if email in user_context.get("vip_list", []):
         return 95
-    
+
     # 职位关键词
     title_keywords = {
         ("CEO", "总经理", "董事长", "总裁"): (90, 100),
         ("总监", "经理", "主管"): (70, 89),
         ("项目经理", "PM"): (50, 69),
     }
-    
+
     # 系统邮件检测
     if any(kw in email for kw in ["noreply", "notification", "system", "alert"]):
         return 20
-    
+
     # 默认
     return 40
 ```

@@ -52,8 +52,7 @@ python scripts/analyze_email.py \
   "summary": {
     "keywords": ["关键词1", "关键词2"],
     "one_line": "一句话概括（20字内）",
-    "brief": "3-5行标准摘要",
-    "key_points": ["要点1", "要点2"]
+    "brief": "3-5行标准摘要"
   },
   "action_items": [
     {

@@ -21,6 +21,7 @@ GENERATE_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "generate_email.py
 POLISH_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "polish_email.py"
 HABITS_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "extract_habits.py"
 EXECUTOR_SCRIPT = SKILL_BASE / "clawmail-executor" / "scripts" / "extract_preference.py"
+OPTIMIZER_SCRIPT = SKILL_BASE / "clawmail-optimizer" / "scripts" / "optimize.py"
 
 
 def _load_gateway_token() -> str:
@@ -41,7 +42,7 @@ BODY_MAX_CHARS = 4000
 
 # AI 返回非法 JSON 或字段缺失时的默认值
 DEFAULT_AI_RESULT = {
-    "summary": {"keywords": [], "one_line": "", "brief": "", "key_points": []},
+    "summary": {"keywords": [], "one_line": "", "brief": ""},
     "action_items": [],
     "metadata": {
         "category": [],
@@ -54,7 +55,7 @@ DEFAULT_AI_RESULT = {
     },
 }
 
-_VALID_SENTIMENTS = {"urgent", "positive", "negative", "neutral"}
+_VALID_SENTIMENTS = {"positive", "negative", "neutral"}
 
 
 class AIProcessingError(Exception):
@@ -77,7 +78,7 @@ class AIProcessor:
         return ["--llm-token", GATEWAY_TOKEN] if GATEWAY_TOKEN else []
 
     def process_email(
-        self, email: Email, account_id: str = None
+        self, email: Email, account_id: str = None, is_sent: bool = False
     ) -> EmailAIMetadata:
         """
         对单封邮件执行 AI 统一提取分析。
@@ -90,6 +91,8 @@ class AIProcessor:
         ] + self._token_args()
         if account_id:
             cmd.extend(["--account-id", account_id])
+        if is_sent:
+            cmd.append("--is-sent")
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120
@@ -237,7 +240,6 @@ class AIProcessor:
                 "keywords": (summary.get("keywords") or [])[:8],
                 "one_line": summary.get("one_line", ""),
                 "brief": summary.get("brief", ""),
-                "key_points": (summary.get("key_points") or [])[:5],
             },
             categories=(metadata.get("category") or [])[:4],
             sentiment=sentiment,

@@ -100,7 +100,7 @@ def generate_email(
     logger.info("生成新邮件: subject=%s tone=%s", subject, tone)
 
     # 获取用户记忆
-    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}")
+    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}") if account_id else {}
     user_profile = read_user_profile()
 
     # 加载 references

@@ -42,7 +42,6 @@
 - **Smart classification** — 6 system tags (urgent, pending reply, notification, subscription, meeting, approval) plus dynamic project tags; clickable sidebar filter
 - **Task extraction** — action items from email body are surfaced automatically in the To Do panel
 - **User profile building** — pending facts system accumulates user information (career, contacts, projects) with confidence scoring; facts promote to `USER.md` when reaching category-specific thresholds
-- **Graceful fallback** — if skill scripts are unavailable, falls back to legacy prompt-based processing via OpenClawBridge
 - **Offline graceful degradation** — if AI is unavailable, emails appear immediately with a `⚠` badge and are queued for later analysis
 
 ### To Do Panel
@@ -99,7 +98,7 @@ Agent conversation histories are logged locally in `~/clawmail_data/chat_logs/` 
 
 ## 🌟 Personalization System — AI Learns From Your Feedback
 
-ClawMail features an **importance scoring feedback loop** that allows the AI to learn your email priorities over time. Unlike static rule-based systems, ClawMail adapts its importance scoring based on your actual behavior.
+ClawMail features a **memory-based personalization loop** that allows the AI to learn your email priorities and preferences over time.
 
 ### How It Works
 
@@ -107,159 +106,73 @@ ClawMail features an **importance scoring feedback loop** that allows the AI to 
 
 Every email receives an importance score from the AI:
 
-- **90-100**: Extremely important, requires immediate action (urgent tasks, leadership directives, critical deadlines)
-- **70-89**: Important, needs prompt attention (project updates, meeting scheduling, client requests)
-- **40-69**: Moderately important (routine communication, information sync, general notifications)
-- **20-39**: Low importance (subscription content, bulk notifications)
-- **0-19**: Not important (ads, promotions, spam)
-
-The scoring criteria is stored in `~/clawmail_data/prompts/importance_score.txt` and can be dynamically updated by OpenClaw.
+- **90-100**: Extremely important, requires immediate action
+- **70-89**: Important, needs prompt attention
+- **40-69**: Moderately important (routine communication)
+- **20-39**: Low importance (subscriptions, bulk notifications)
+- **0-19**: Not important (ads, spam)
 
 #### 2. User Feedback — Two Ways
 
-**Method 1: Manual Score Input**
-- Click the edit button next to the importance score (e.g., "(75)")
-- Enter a new score from 0-100
+**Method 1: Manual Score Input** — click the score badge, enter 0-100
 
-**Method 2: Drag-to-Reorder** (when importance sorting is enabled)
-- Drag emails to reorder them in the list
-- Between two emails: new score = average of neighboring scores
-- To the top: new score = first email's score + 5 (max 100)
-- To the bottom: new score = last email's score - 5 (min 0)
+**Method 2: Drag-to-Reorder** (importance sorting mode) — drag emails in the list; new score is computed from neighboring emails' scores
 
-Both methods immediately update the database and refresh the email list.
+Both immediately update the database and trigger the executor skill.
 
-#### 3. Feedback Logging
+#### 3. Personalization Feedback Loop
 
-Every score modification is logged to `~/clawmail_data/feedback/feedback_importance_score.jsonl`:
+```
+User modifies score / gives summary thumbs-down / edits AI reply draft
+    ↓
+ClawMail calls clawmail-executor skill via subprocess:
+    python extract_preference.py
+        --feedback-type importance_score|summary_rating|reply_edit
+        --feedback-data '{"original_score": 45, "user_score": 78}'
+        --email-id <id>  --account-id <id>
+    ↓
+Skill fetches email + existing memories via REST API
+    ↓
+LLM applies 5 extraction skills (memory_types.md):
+    extract_sender_importance, extract_urgency_signals,
+    detect_automated_content, extract_summary_preferences,
+    track_response_patterns
+    ↓
+Outputs INSERT/UPDATE/DELETE memory operations
+    ↓
+Skill writes to /memories/{account_id} REST API → ClawDB
+    ↓
+Next email analysis: analyzer skill reads memories,
+injects them into LLM prompt → personalised scoring
+```
+
+#### 4. Feedback Logging
+
+Every score modification is logged to `~/clawmail_data/feedback/feedback_importance_score.jsonl` for personalization skill consumption:
 
 ```json
 {
   "timestamp": "2026-02-27T14:30:00",
   "email_id": "uuid-xxx",
   "subject": "Project Deadline Reminder",
-  "keywords": ["project", "deadline"],
-  "one_line": "Reminder: Q1 report due Friday",
-  "brief": "Manager reminds team to submit Q1 progress reports by Friday EOD.",
-  "key_points": ["Q1 report", "Friday deadline"],
   "original_score": 45,
   "new_score": 78,
-  "mode": "manual_input",
-  "context": null
+  "mode": "manual_input"
 }
 ```
-
-For drag-to-reorder, `context` includes the subject, keywords, summaries, and scores of neighboring emails.
-
-#### 4. ClawMail ↔ OpenClaw Personalization Loop
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      ClawMail (Client)                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  User modifies importance score (manual or drag)                │
-│         ↓                                                       │
-│  Update database + log to feedback_importance_score.jsonl      │
-│         ↓                                                       │
-│  Check: feedback count ≥ 5?                                    │
-│         ↓ Yes                                                   │
-│  Trigger personalization via personalizationAgent001:          │
-│                                                                 │
-│  POST http://127.0.0.1:18789/v1/chat/completions                │
-│  {                                                              │
-│    "user": "personalizationAgent001",                          │
-│    "messages": [{                                               │
-│      "content": "(ClawMail-Personalization) 用户已累积...      │
-│        feedback_type: importance_score                          │
-│        feedback_path: ~/clawmail_data/feedback/...jsonl        │
-│        prompt_path: ~/clawmail_data/prompts/importance..."      │
-│    }]                                                           │
-│  }                                                              │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                 OpenClaw (Local AI Gateway)                     │
-│                   http://127.0.0.1:18789                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Receives trigger → routes to clawmail-personalization skill   │
-│         ↓                                                       │
-│  Skill execution:                                               │
-│    1. GET /personalization/feedback/importance_score            │
-│       ← Read 5 feedback entries from ClawMail API               │
-│    2. GET /personalization/prompt/importance_score              │
-│       ← Read current scoring criteria                           │
-│    3. Load user profile from OpenClaw memory                    │
-│    4. Analyze patterns via Kimi K2.5:                           │
-│       "User consistently boosts meeting-related emails..."      │
-│       "User downgrades subscription newsletters..."             │
-│    5. Generate personalized importance_score.txt                │
-│    6. POST /personalization/update-prompt                       │
-│       → Backup old prompt to archive/, write new version        │
-│    7. POST /personalization/archive-feedback                    │
-│       → Archive consumed feedback, clear main file              │
-│    8. POST /personalization/status                              │
-│       → Notify ClawMail: "✅ Importance scoring updated"        │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      ClawMail (Client)                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Display status: "✅ 个性化更新完成"                             │
-│         ↓                                                       │
-│  Next email AI analysis loads updated prompt                    │
-│         ↓                                                       │
-│  Importance scores now match user preferences!                  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-#### 5. Automatic Prompt Evolution
-
-The scoring criteria in `~/clawmail_data/prompts/importance_score.txt` evolves based on your feedback:
-
-```
-Initial AI scoring:
-"Meeting emails: 60 points (moderately important)"
-
-After 5 feedback entries showing you boost meeting emails to 85+:
-
-Updated AI scoring:
-"Meeting emails: 80 points (important, requires prompt attention)"
-```
-
-Old prompts are archived to `~/clawmail_data/prompts/archive/` for version tracking.
 
 ### Data Storage
 
 ```
 ~/clawmail_data/
-├── chat_logs/                              ← AI conversation logs (per agent)
-│   ├── mailAgent001.log
-│   ├── personalizationAgent001.log
-│   └── ...
-├── feedback/
-│   ├── feedback_importance_score.jsonl      ← Active feedback (email_id deduplicated)
-│   └── importance_score/
-│       └── 2026-02-27T14-30-00.jsonl        ← Archived after OpenClaw consumes
-├── prompts/
-│   ├── importance_score.txt                 ← Current scoring criteria
-│   └── archive/
-│       └── importance_score_2026-02-27.txt  ← Old versions
-└── clawmail.db
+├── chat_logs/                    ← AI conversation logs (per agent)
+├── feedback/                     ← Feedback logs (importance, summary, reply)
+└── clawmail.db                   ← SQLite (emails, memories, pending_facts, tasks)
 ```
 
 ### ClawMail REST API for OpenClaw Skills
 
 ClawMail exposes a local API at `http://127.0.0.1:9999` for OpenClaw skills:
-
-#### Skill-Driven Data Endpoints (New)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -267,28 +180,17 @@ ClawMail exposes a local API at `http://127.0.0.1:9999` for OpenClaw skills:
 | `/emails/{email_id}` | GET | Get full email data (body truncated to 4000 chars) |
 | `/emails/{email_id}/ai-metadata` | GET | Get existing AI analysis results |
 | `/emails/{email_id}/ai-metadata` | POST | Skill writes analysis results |
-| `/memories/{account_id}` | GET | Get user preference memories (MemoryBank) |
-| `/memories/{account_id}` | POST | Write user preference memory |
+| `/memories/{account_id}` | GET | Get user preference memories |
+| `/memories/{account_id}` | POST | Write/update/delete user preference memory |
 | `/pending-facts/{account_id}` | GET | Get pending user profile facts |
-| `/pending-facts/{account_id}` | POST | Write pending facts (with confidence accumulation) |
+| `/pending-facts/{account_id}` | POST | Write pending facts (confidence accumulation) |
 | `/pending-facts/{account_id}/promote` | POST | Promote qualified facts to USER.md |
-
-#### Personalization Endpoints (Legacy)
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/personalization/feedback/{type}` | GET | Read feedback data (JSON array) |
-| `/personalization/prompt/{type}` | GET | Read current prompt content |
-| `/personalization/update-prompt` | POST | Backup old prompt + write new version |
-| `/personalization/archive-feedback` | POST | Archive consumed feedback + clear main file |
-| `/personalization/status` | POST | Notify UI of skill completion |
 
 ### Benefits
 
 ✅ **Learns from behavior** — no manual rule configuration needed
-✅ **Continuous adaptation** — AI improves with every 5 feedback entries
+✅ **Immediate updates** — preferences extracted on every correction
 ✅ **Privacy-first** — all data stays local (ClawMail + OpenClaw)
-✅ **Transparent evolution** — old prompts archived for comparison
 ✅ **Cross-session persistence** — learned preferences survive app restarts
 
 ---
@@ -388,7 +290,7 @@ ClawMail/
 │   │
 │   ├── infrastructure/
 │   │   ├── database/
-│   │   │   └── storage_manager.py       # ClawDB — SQLite via WAL; accounts, emails, tasks, settings
+│   │   │   └── storage_manager.py       # ClawDB — SQLite via WAL; accounts, emails, tasks, memories
 │   │   ├── email_clients/
 │   │   │   ├── imap_client.py           # ClawIMAPClient — aioimaplib, XOAUTH2 + plain auth
 │   │   │   ├── smtp_client.py           # ClawSMTPClient — aiosmtplib, STARTTLS + OAuth
@@ -396,8 +298,8 @@ ClawMail/
 │   │   ├── auth/
 │   │   │   └── microsoft_graph_oauth.py # Device-code flow helpers
 │   │   ├── ai/
-│   │   │   ├── openclawbridge.py        # OpenClaw ↔ openai SDK bridge (sync, streamed)
-│   │   │   ├── ai_processor.py          # Skill-Driven: subprocess → skill scripts (fallback: legacy prompt)
+│   │   │   ├── openclawbridge.py        # OpenClaw ↔ openai SDK bridge (sync, streamed, chat panel)
+│   │   │   ├── ai_processor.py          # Skill-Driven: subprocess → skill scripts
 │   │   │   └── agent_registry.py        # Multi-agent configuration (6 agents)
 │   │   └── security/
 │   │       └── credential_manager.py    # CredentialManager — keyring + Fernet
@@ -440,20 +342,12 @@ AIService.enqueue(email_id)
     │  run_in_executor
     ▼
 AIProcessor.process_email()
-    │  Priority: skill script → fallback legacy
-    ├─── [Skill Path] subprocess → analyze_email.py
-    │      │  Script calls LLM API internally
-    │      │  Script writes results via REST API → ClawDB
-    │      │  Script extracts pending facts → REST API → pending_facts table
-    │      ▼
-    │    ClawDB (results already written)
-    │
-    └─── [Fallback] OpenClawBridge → OpenClaw → Kimi K2.5
-           │  Agent: mailAgent001
-           │  JSON: { summary, category, sentiment, action_items }
-           ▼
-         ClawDB.update_email_ai(…)
-    │
+    │  subprocess → analyze_email.py
+    │    Script calls LLM (http://127.0.0.1:18789/v1) directly
+    │    Script writes results via REST API → ClawDB
+    │    Script extracts pending facts → REST API → pending_facts table
+    ▼
+ClawDB (results written by skill)
     │  email_processed signal (Qt, main thread)
     ▼
 ClawMailApp — refreshes email list item in place
@@ -557,7 +451,7 @@ To remove an account, select **Remove Current Account** from the dropdown. All l
 | 4 — AI assistant | ✅ Done | AI chat panel, streaming, compose assist, feedback rating |
 | Multi-account | ✅ Done | Account switcher, modern login dialog, Microsoft OAuth |
 | Multi-agent system | ✅ Done | 6 specialized agents, personalization learning, cross-agent memory |
-| Skill-Driven migration | ✅ Done | AI logic → OpenClaw skill scripts, pending_facts table, 9 new REST APIs, subprocess invocation with fallback |
+| Skill-Driven migration | ✅ Done | AI logic → OpenClaw skill scripts, pending_facts table, 9 REST APIs, subprocess invocation, old MemSkill in-process system removed |
 | 5 — Search & threads | 🔜 Planned | ChromaDB semantic search, email thread grouping |
 | 6 — Polish & expand | 🔜 Planned | Calendar sync, mobile, plugin marketplace, collaboration |
 

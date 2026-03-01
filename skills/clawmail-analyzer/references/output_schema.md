@@ -16,16 +16,10 @@
     },
     "summary": {
       "type": "object",
-      "required": ["one_line", "brief", "key_points"],
+      "required": ["one_line", "brief"],
       "properties": {
         "one_line": {"type": "string", "maxLength": 20},
-        "brief": {"type": "string"},
-        "key_points": {
-          "type": "array",
-          "items": {"type": "string"},
-          "minItems": 0,
-          "maxItems": 5
-        }
+        "brief": {"type": "string"}
       }
     },
     "outline": {
@@ -66,7 +60,7 @@
           "items": {"type": "string"},
           "maxItems": 4
         },
-        "sentiment": {"enum": ["urgent", "positive", "negative", "neutral"]},
+        "sentiment": {"enum": ["positive", "negative", "neutral"]},
         "language": {"enum": ["zh", "en", "ja"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "is_spam": {"type": "boolean"},
@@ -104,11 +98,6 @@
   "summary": {
     "one_line": "邀请参加周五Q4项目进度汇报会议",
     "brief": "张三邀请参加本周五下午2点的项目进度汇报会议。\n会议将回顾Q4项目进展、讨论当前问题并规划下阶段工作。\n需要确认参会并准备团队进度报告PPT。",
-    "key_points": [
-      "会议时间：本周五下午2点",
-      "议程：进度回顾、问题讨论、资源规划",
-      "需准备：团队进度报告PPT"
-    ]
   },
   "outline": [
     {
@@ -181,7 +170,6 @@
 |------|------|------|------|
 | one_line | string | 20字以内 | 一句话核心概括 |
 | brief | string | 无限制 | 3-5行标准摘要 |
-| key_points | array | 最多5个 | 关键要点列表 |
 
 ### outline
 | 字段 | 类型 | 说明 |
@@ -206,7 +194,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | category | array | 分类标签，最多4个 |
-| sentiment | enum | urgent/positive/negative/neutral |
+| sentiment | enum | positive/negative/neutral |
 | language | enum | zh/en/ja |
 | confidence | number | 0.0-1.0 置信度 |
 | is_spam | boolean | 是否为垃圾邮件 |

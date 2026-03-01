@@ -655,7 +655,7 @@ def parse_ai_response(raw: str) -> dict:
     except (json.JSONDecodeError, KeyError):
         # 降级：返回所有字段的空默认值
         return {
-            "summary": {"one_line": "", "brief": "", "key_points": []},
+            "summary": {"one_line": "", "brief": ""},
             "category": [],
             "sentiment": "neutral",
             "action_items": [],
@@ -691,7 +691,7 @@ CREATE VIRTUAL TABLE emails_fts USING fts5(
     content_rowid='rowid',
     tokenize='unicode61'  -- 支持中文、日文等 Unicode 字符
 );
--- 注：summary（含 one_line / brief / key_points / keywords）存储在
+-- 注：summary（含 one_line / brief / keywords）存储在
 --     email_ai_metadata 表的 summary JSON 列中，
 --     无法通过 content='emails' 的 FTS5 表统一索引。
 --     AI 字段的全文检索在 Phase 5 通过 ChromaDB 向量搜索覆盖。

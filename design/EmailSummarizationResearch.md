@@ -13,10 +13,9 @@
 | 维度 | 说明 | 示例 |
 |------|------|------|
 | **一句话摘要** (one_line) | 15-30 字，回答"这封邮件说了什么" | "张三汇报 Q4 项目进度，完成率 85%，预算超支 10%" |
-| **关键要点** (key_points) | 3-5 条结构化要点，覆盖核心事实 | ["完成率 85%", "预算超支 10%", "需要额外人力支持"] |
 | **关键词** (keywords) | 3-8 个标签，用于检索和分类 | ["Q4", "项目进度", "预算", "人力"] |
 | **行动事项** (action_items) | 需要用户采取的具体行动 | [{text: "回复确认", deadline: "明天", priority: "high"}] |
-| **情感倾向** (sentiment) | 邮件的情绪基调 | urgent / positive / negative / neutral |
+| **情感倾向** (sentiment) | 邮件的情绪基调 | positive / negative / neutral |
 | **重要性评分** (importance) | 0-100 的量化优先级 | 72（综合发件人权重、紧急度、截止日等） |
 | **建议回复立场** (reply_stances) | 2-3 种可选的回复策略 | ["确认收到并查看", "询问具体细节", "转发相关同事"] |
 | **分类标签** (categories) | 邮件类型分类 | ["pending_reply", "项目:Q4"] |
@@ -144,8 +143,10 @@ def post_process(raw_json: dict) -> dict:
 #### Step 5: 持久化 & 下游触发
 
 - 将结构化结果写入 `email_ai_metadata` 表
-- 异步触发偏好提取（executor skill）：从邮件内容中提取用户习惯和事实
-- 更新 `pending_facts` 表：累积置信度，达标后提升到 USER.md
+- LLM 提取的 `pending_facts` 按 `fact_key` 前缀**分流写入两个存储**：
+  - `contact.*` facts → 直接写入 **MemoryBank**（`user_preference_memory` 表），立即生效，下封邮件即可读到
+  - 其他 facts（`career.*` / `org.*` / `project.*`）→ 写入 **pending_facts 表**，累积置信度达标后提升到 **USER.md**
+- 异步触发偏好提取（executor skill）：从用户修正行为中提取习惯，写入/更新/删除 MemoryBank 条目
 
 ---
 
@@ -245,7 +246,7 @@ complexity_weight 20% 需要的回复/处理复杂度
 {
   "summary": {
     "one_line": "15-30字的一句话摘要",
-    "key_points": ["要点1", "要点2", "要点3"],
+    "brief": "3-5行标准摘要",
     "keywords": ["关键词1", "关键词2"]
   },
   "action_items": [
@@ -258,7 +259,7 @@ complexity_weight 20% 需要的回复/处理复杂度
   ],
   "metadata": {
     "category": ["分类标签"],
-    "sentiment": "urgent|positive|negative|neutral",
+    "sentiment": "positive|negative|neutral",
     "is_spam": false,
     "importance_score": 0-100,
     "importance_breakdown": {
@@ -278,7 +279,7 @@ complexity_weight 20% 需要的回复/处理复杂度
 | 技巧 | 说明 |
 |------|------|
 | **输出格式先行** | 在 prompt 末尾放 JSON Schema，LLM 更倾向遵守 |
-| **枚举约束** | sentiment 用 `"urgent\|positive\|negative\|neutral"` 明确列出合法值 |
+| **枚举约束** | sentiment 用 `"positive\|negative\|neutral"` 明确列出合法值 |
 | **数值范围** | importance_score 用 `"0-100"` 标注范围 |
 | **示例驱动** | 对复杂字段（如 action_items）给一个完整示例 |
 | **负面指令** | "不要编造邮件中未提及的事实"、"如果没有行动事项则返回空数组" |
@@ -354,7 +355,7 @@ complexity_weight 20% 需要的回复/处理复杂度
 - [x] **预处理增强**：✅ 已实现签名块去除（`strip_signature`）和引用历史清理（`strip_quoted_content`），预处理在截断之前执行
 - [x] **线程摘要**：✅ 已实现增量线程上下文注入，回复邮件自动获取历史摘要并注入 LLM prompt
 - [x] **列表长度限制**：✅ 已在 skill 侧（`_enforce_list_limits`）和 ClawMail 侧（`_build_metadata`）双重截断
-- [ ] **幻觉检测**：对 key_points 做原文回溯校验，确保可追溯
+- [ ] **幻觉检测**：对 brief 做原文回溯校验，确保可追溯
 - [ ] **用户反馈闭环**：用户修改/忽略摘要时，记录为隐式反馈，优化后续提取（Executor 已部分实现）
 - [ ] **分层摘要**：超长邮件使用 MapReduce 策略，先分段再合并
 

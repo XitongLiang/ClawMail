@@ -45,9 +45,9 @@
 
 | 字段 | 类型 | 生成方式 |
 |------|------|---------|
-| `summary` | Object | AI生成摘要：含 one_line / brief / key_points / keywords 四层结构（keywords 和原 outline 已合并至此） |
+| `summary` | Object | AI生成摘要：含 one_line / brief / keywords 三层结构（keywords 和原 outline 已合并至此） |
 | `category` | List[String] | 智能分类标签（**规范值见 tech_spec.md 第3节**） |
-| `sentiment` | Enum | AI情感/紧急度：`urgent` / `positive` / `negative` / `neutral` |
+| `sentiment` | Enum | AI情感倾向：`positive` / `negative` / `neutral` |
 | `is_spam` | Boolean | 是否为垃圾邮件 |
 | `action_items` | List[ActionItem] | 待办事项提取 |
 | `reply_stances` | List[String] | AI 建议的回复立场 |
@@ -138,11 +138,10 @@ processed（正式显示在列表中）
     "summary": {
       "one_line": "张三申请Q4项目延期两周",
       "brief": "Q4项目因外部供应商交付延迟，申请延期两周至2月15日，附最新排期表。",
-      "key_points": ["供应商延迟是根因", "预计延期至2月15日", "需尽快确认是否同意"],
       "keywords": ["Q4项目", "延期申请", "供应商", "进度汇报", "排期"]
     },
     "category": ["urgent", "项目:项目A", "pending_reply"],
-    "sentiment": "urgent",
+    "sentiment": "negative",
     "is_spam": false,
     "importance_score": 92,
     "reply_stances": ["同意延期", "要求更详细排期"],
@@ -190,7 +189,7 @@ processed（正式显示在列表中）
 
 2. **状态分离**：`sync_status`（下载）与`ai_status`（处理）独立，支持断点续传和重试
 
-3. **摘要结构化**：summary 包含 one_line / brief / key_points / keywords 四层结构，满足不同场景展示需求
+3. **摘要结构化**：summary 包含 one_line / brief / keywords 三层结构，满足不同场景展示需求
 
 4. **待办双向绑定**：邮件中的`action_items`与ToDo清单系统共享ID，状态同步
 

@@ -938,19 +938,20 @@ class ComposeDialog(QDialog):
                     keywords=kw,
                     one_line=ol,
                 )
-                # MemSkill: 触发 Executor 提取回复偏好记忆
+                # Executor skill: 提取回复偏好记忆
                 parent = self.parent()
-                if (source == "reply_draft" and parent
-                        and hasattr(parent, "_run_executor_reply")
-                        and getattr(parent, "_executor", None)):
+                if source == "reply_draft" and parent and hasattr(parent, "_run_executor_skill"):
                     import asyncio as _aio
-                    _aio.ensure_future(parent._run_executor_reply(
+                    _aio.ensure_future(parent._run_executor_skill(
+                        "reply_edit",
+                        {
+                            "ai_draft": self._ai_draft_text,
+                            "user_edited": final_body,
+                            "similarity": ratio,
+                            "stance": self._ai_draft_context.get("stance"),
+                            "tone": self._ai_draft_context.get("tone"),
+                        },
                         email_id,
-                        self._ai_draft_text,
-                        final_body,
-                        ratio,
-                        self._ai_draft_context.get("stance"),
-                        self._ai_draft_context.get("tone"),
                     ))
 
         # ── 润色反馈 ──
@@ -972,6 +973,50 @@ class ComposeDialog(QDialog):
                     user_final=final_body,
                     similarity_ratio=ratio,
                 )
+
+        # ── 反馈积累触发 optimizer ──
+        self._maybe_trigger_optimizer()
+
+    def _maybe_trigger_optimizer(self) -> None:
+        """检查反馈数量，达到阈值时 fire-and-forget 触发 optimizer skill。"""
+        try:
+            from clawmail.infrastructure.ai.ai_processor import OPTIMIZER_SCRIPT, GATEWAY_TOKEN
+            if not OPTIMIZER_SCRIPT.exists():
+                return
+            if not self._db:
+                return
+
+            parent = self.parent()
+            account_id = ""
+            if parent and hasattr(parent, "_current_account_id"):
+                account_id = parent._current_account_id or ""
+
+            _THRESHOLD = 5
+            feedback_dir = self._db.data_dir / "feedback"
+            for feedback_type in ("email_generation", "polish_email"):
+                feedback_file = feedback_dir / f"feedback_{feedback_type}.jsonl"
+                if not feedback_file.exists():
+                    continue
+                lines = [l for l in feedback_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+                if len(lines) < _THRESHOLD:
+                    continue
+                # 达到阈值，映射 feedback_type → prompt_type
+                prompt_type = feedback_type  # 恰好相同
+                import subprocess as _sp
+                import sys as _sys
+                cmd = [
+                    _sys.executable, str(OPTIMIZER_SCRIPT),
+                    "--prompt-type", prompt_type,
+                    "--account-id", account_id,
+                ]
+                if GATEWAY_TOKEN:
+                    cmd.extend(["--llm-token", GATEWAY_TOKEN])
+                _sp.Popen(
+                    cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    start_new_session=True,
+                )
+        except Exception:
+            pass  # fire-and-forget，不影响用户操作
 
     def _trigger_habit_extraction(self, to_addresses, cc_addresses, subject, body):
         """Skill-Driven: 邮件发送成功后异步触发用户撰写习惯提取。"""

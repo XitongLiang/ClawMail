@@ -80,7 +80,7 @@ analyze_email.py 读取偏好
 | 反馈类型 | 出现次数 | 调整策略 |
 |---------|---------|---------|
 | too_long | ≥2 | detail_level → brief, max_brief_lines = 3 |
-| too_short | ≥2 | detail_level → detailed, min_key_points = 5 |
+| too_short | ≥2 | detail_level → detailed, min_brief_lines = 5 |
 | missing_deadline | ≥2 | focus_areas 添加 "deadline" |
 | missing_action_items | ≥2 | focus_areas 添加 "action_items" |
 | wrong_tone | ≥2 | avoid_patterns 添加 "too_formal" |
@@ -107,7 +107,6 @@ analyze_email.py 读取偏好
   "detail_level": "brief",
   "style_adjustments": {
     "max_brief_lines": 3,
-    "max_key_points": 2
   }
 }
 ```
@@ -133,7 +132,7 @@ analyze_email.py 读取偏好
 
 **效果**：
 - 优先提取时间信息
-- 在 key_points 中优先放置截止时间
+- 在 brief 中优先提及截止时间
 - 增强日期模式匹配敏感度
 
 ## API 参考

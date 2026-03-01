@@ -64,9 +64,9 @@ class EmailAIMetadata:
     email_id: str                              # 关联 emails.id
 
     # 统一提取结果（来自 Prompt #1）
-    summary: Optional[Dict] = None            # {"keywords":[], "one_line":"", "brief":"", "key_points":[]}
+    summary: Optional[Dict] = None            # {"keywords":[], "one_line":"", "brief":""}
     categories: Optional[List[str]] = None    # 规范值见 tech_spec.md 第 3 节
-    sentiment: Optional[str] = None           # urgent/positive/negative/neutral
+    sentiment: Optional[str] = None           # positive/negative/neutral
     suggested_reply: Optional[str] = None     # AI 生成的建议回复草稿
     is_spam: Optional[bool] = None            # AI 判断是否为垃圾邮件
     action_items: Optional[List[Dict]] = None  # AI 提取的行动项（来自 Prompt #1）
@@ -98,6 +98,4 @@ class EmailAIMetadata:
     def summary_brief(self) -> str:
         return (self.summary or {}).get("brief", "")
 
-    @property
-    def summary_key_points(self) -> List[str]:
-        return (self.summary or {}).get("key_points", [])
+

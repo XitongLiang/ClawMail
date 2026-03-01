@@ -71,7 +71,6 @@ class TaskPriority(str, Enum):
 
 
 class AISentiment(str, Enum):
-    URGENT = "urgent"
     POSITIVE = "positive"
     NEGATIVE = "negative"
     NEUTRAL = "neutral"

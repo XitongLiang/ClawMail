@@ -12,22 +12,22 @@ Manage and query ClawMail email data from the SQLite database.
 ClawMail 数据存储在以下位置：
 
 ```
-C:\Users\<用户名>\clawmail_data\
+~/clawmail_data/
 ├── clawmail.db          # SQLite 数据库文件
-├── emails\              # 邮件原始内容存储
-│   ├── <account_id>\    # 按账户分类
-│   │   ├── <folder>\    # 按文件夹分类
+├── emails/              # 邮件原始内容存储
+│   ├── <account_id>/    # 按账户分类
+│   │   ├── <folder>/    # 按文件夹分类
 │   │   │   └── <email_id>.eml
 │   └── ...
-├── attachments\         # 附件存储
+├── attachments/         # 附件存储
 │   └── <attachment_id>.<ext>
-└── logs\                # 操作日志
+└── logs/                # 操作日志
     └── clawmail.log
 ```
 
 ## Database Location
 
-The SQLite database is located at: `C:\Users\<用户名>\clawmail_data\clawmail.db`
+The SQLite database is located at: `~/clawmail_data/clawmail.db`
 
 ## Available Scripts
 
@@ -197,7 +197,7 @@ python scripts/list_emails.py --folder INBOX --json > inbox_emails.json
 ### 数据库连接问题
 确保数据库文件存在：
 ```bash
-ls C:\Users\%USERNAME%\clawmail_data\clawmail.db
+ls ~/clawmail_data/clawmail.db
 ```
 
 ### 权限问题
@@ -206,5 +206,5 @@ ls C:\Users\%USERNAME%\clawmail_data\clawmail.db
 ### 数据备份建议
 定期备份数据库文件：
 ```bash
-copy C:\Users\%USERNAME%\clawmail_data\clawmail.db C:\Users\%USERNAME%\clawmail_data\clawmail.db.backup
+cp ~/clawmail_data/clawmail.db ~/clawmail_data/clawmail.db.backup
 ```

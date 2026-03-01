@@ -28,6 +28,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# System prompt: 强制 LLM 只返回 JSON 数组
+_SYSTEM_PROMPT = (
+    "你是一个 JSON 输出机器。你的唯一任务是根据用户的指令返回一个 JSON 数组。"
+    "不要输出任何分析过程、解释、Markdown 标记或其他文字。"
+    "只输出一个合法的 JSON 数组，以 [ 开头，以 ] 结尾。"
+)
+
+# Executor prompt 模板（与 executor.py 对齐，逐个应用所有技能）
+_EXECUTOR_PROMPT = """你是 ClawMail 的个性化记忆管理执行器。
+
+你的任务：分析 AI 预测与用户修正之间的差异，从中提取用户偏好并输出记忆操作。
+
+【当前邮件】
+{email_data}
+
+【AI 预测】
+{prediction}
+
+【用户修正】
+{correction}
+
+【已有用户记忆】
+{existing_memories}
+
+【可用技能（全部应用）】
+{skills}
+
+【指令】
+- 逐个应用上述技能，分析用户修正背后的偏好
+- 如果发现新偏好，输出 INSERT 操作
+- 如果已有记忆需要更新（同一发件人/同类偏好），输出 UPDATE 操作并指定 memory_id
+- 如果已有记忆明显错误，输出 DELETE 操作
+- 不要输出没有依据的猜测，只基于实际的修正差异
+- 如果修正幅度很小（< 10分）或无法推断偏好，输出空数组
+
+【输出要求】
+严格返回 JSON 数组，不要 Markdown 标记：
+[
+  {{"op": "insert", "memory_type": "类型", "memory_key": "键或null", "content": {{}}, "confidence": 0.7}},
+  {{"op": "update", "memory_id": "已有记忆ID", "content": {{}}, "confidence": 0.8}},
+  {{"op": "delete", "memory_id": "已有记忆ID", "reason": "原因"}}
+]
+
+如果没有值得记录的偏好，返回空数组：[]
+
+重要：直接返回 JSON 数组，不要任何分析过程、Markdown 标记或解释文字。"""
+
 
 def load_reference(subpath: str) -> str:
     path = REFERENCES_DIR / subpath
@@ -71,22 +118,91 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
     return result["choices"][0]["message"]["content"]
 
 
-def parse_json_from_llm(raw: str) -> dict:
-    """从 LLM 输出中解析 JSON 对象。"""
+def format_skills_from_reference(skills_text: str) -> str:
+    """将 memory_types.md 内容转为技能说明段（--- 技能 N: name --- 格式）。"""
+    # memory_types.md 已按 ## 技能 N: name 分节，直接使用整体内容
+    return skills_text.strip()
+
+
+def parse_json_array_from_llm(raw: str) -> list:
+    """从 LLM 输出中解析 JSON 数组。"""
+    import re
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        start = 1
-        end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
-        text = "\n".join(lines[start:end])
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```\s*$", "", text)
+
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-        raise
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        match = re.search(r'\[.*\]', text, flags=re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+                if isinstance(result, list):
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+    logger.warning("JSON 数组解析失败: %s", text[:200])
+    return []
+
+
+def validate_operations(operations: list) -> list:
+    """验证每个操作的基本格式，过滤无效条目。"""
+    valid = []
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        action = op.get("op", "").lower()
+        if action == "insert" and "memory_type" in op:
+            valid.append(op)
+        elif action == "update" and "memory_id" in op:
+            valid.append(op)
+        elif action == "delete" and "memory_id" in op:
+            valid.append(op)
+    return valid
+
+
+def apply_operations(account_id: str, operations: list) -> int:
+    """通过 REST API 将记忆操作写入 MemoryBank，返回成功数量。"""
+    count = 0
+    for op in operations:
+        action = op.get("op", "").lower()
+        try:
+            if action == "insert":
+                payload = {
+                    "memory_type": op["memory_type"],
+                    "memory_key": op.get("memory_key"),
+                    "memory_content": op.get("content", {}),
+                    "confidence_score": float(op.get("confidence", 0.5)),
+                    "evidence_count": 1,
+                }
+                _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", payload)
+                count += 1
+                logger.info("INSERT: type=%s key=%s", op["memory_type"], op.get("memory_key"))
+
+            elif action == "update":
+                payload = {
+                    "op": "update",
+                    "memory_id": op["memory_id"],
+                    "content": op.get("content", {}),
+                    "confidence": float(op.get("confidence", 0.7)),
+                }
+                _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", payload)
+                count += 1
+                logger.info("UPDATE: memory_id=%s", op["memory_id"])
+
+            elif action == "delete":
+                payload = {"op": "delete", "memory_id": op["memory_id"]}
+                _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", payload)
+                count += 1
+                logger.info("DELETE: memory_id=%s", op["memory_id"])
+
+        except Exception as e:
+            logger.warning("操作失败 %s: %s", action, e)
+
+    return count
 
 
 def extract_preference(
@@ -96,8 +212,8 @@ def extract_preference(
     分析用户修正，提取偏好，写入 MemoryBank。
 
     Step 0: 获取邮件上下文和已有记忆
-    Step 1: LLM Call — 偏好分析
-    Step 2: 写入 MemoryBank（如果有结果）
+    Step 1: LLM Call — 逐个应用所有技能分析用户修正
+    Step 2: 解析操作 → 写入 MemoryBank
     """
     logger.info(
         "提取偏好: type=%s email_id=%s account_id=%s",
@@ -106,55 +222,92 @@ def extract_preference(
 
     # ── Step 0: 获取数据 ──
     email = _http_get(f"{CLAWMAIL_API}/emails/{email_id}")
-    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}")
+    memories_resp = _http_get(f"{CLAWMAIL_API}/memories/{account_id}")
+    existing_memories = memories_resp.get("memories", [])
 
-    # ── Step 1: LLM Call — 偏好分析 ──
-    extraction_guide = load_reference("prompts/memory_extraction_guide.md")
-    memory_types = load_reference("prompts/memory_types.md")
+    # ── 构建 prompt 各段 ──
+    email_text = json.dumps(email, ensure_ascii=False, indent=2)
 
-    system_prompt = f"""你是一个用户偏好分析助手。分析用户对 AI 预测的修正行为，提取偏好记忆。
+    if existing_memories:
+        mem_lines = []
+        for m in existing_memories[:10]:
+            mem_lines.append(
+                f"- [id={m.get('id', '?')}] type={m.get('memory_type')}, "
+                f"key={m.get('memory_key')}, "
+                f"confidence={m.get('confidence_score', 0):.2f}, "
+                f"content={json.dumps(m.get('memory_content', {}), ensure_ascii=False)}"
+            )
+        existing_text = "\n".join(mem_lines)
+    else:
+        existing_text = "（暂无已有记忆）"
 
-## 提取规则
-{extraction_guide}
-
-## 记忆类型定义
-{memory_types}
-
-## 已有记忆（参考，避免重复）
-{json.dumps(memories.get('memories', [])[:10], ensure_ascii=False, indent=2)}
-
-请输出一个 JSON 对象，格式为：
-{{"memory_type": "...", "memory_key": "...", "memory_content": {{...}}, "confidence_score": 0.0, "evidence_count": 1}}
-
-如果这次修正没有明确的偏好信号，输出 {{"skip": true, "reason": "..."}}。
-不要输出任何 JSON 之外的内容。"""
-
+    # 构建预测/修正描述
     sender_email = email.get("from_address", {}).get("email", "unknown")
-    user_prompt = f"""用户修正类型: {feedback_type}
+    if feedback_type == "importance_score":
+        original = feedback_data.get("original_score", "?")
+        user_val = feedback_data.get("user_score", "?")
+        prediction = f"重要性评分: {original}/100"
+        correction = f"用户修正为: {user_val}/100（差异: {abs(int(user_val) - int(original)) if str(original).isdigit() and str(user_val).isdigit() else '?'}）"
+    elif feedback_type == "summary_rating":
+        summary = feedback_data.get("summary", {})
+        reasons = feedback_data.get("reasons", [])
+        comment = feedback_data.get("comment", "")
+        prediction = (
+            f"AI 摘要:\n"
+            f"- one_line: {summary.get('one_line', '')}\n"
+            f"- brief: {summary.get('brief', '')}\n"
+            f"- keywords: {summary.get('keywords', [])}"
+        )
+        parts = ["用户反馈: 差评"]
+        if reasons:
+            parts.append(f"问题原因: {', '.join(reasons)}")
+        if comment:
+            parts.append(f"用户补充说明: {comment}")
+        correction = "\n".join(parts)
+    elif feedback_type == "reply_edit":
+        ai_draft = feedback_data.get("ai_draft", "")
+        user_edited = feedback_data.get("user_edited", "")
+        similarity = feedback_data.get("similarity", 1.0)
+        prediction = f"AI 回复草稿:\n{ai_draft[:500]}"
+        correction = f"用户最终版本（相似度: {similarity:.2%}）:\n{user_edited[:500]}"
+    elif feedback_type == "category_change":
+        prediction = f"原始分类: {feedback_data.get('original_categories', [])}"
+        correction = f"用户修改为: {feedback_data.get('user_categories', [])}"
+    else:
+        prediction = f"AI 预测: {json.dumps(feedback_data.get('original', {}), ensure_ascii=False)}"
+        correction = f"用户修正: {json.dumps(feedback_data.get('corrected', {}), ensure_ascii=False)}"
 
-邮件信息:
-- 主题: {email.get('subject', '')}
-- 发件人: {sender_email}
-- 分类: {email.get('categories', [])}
+    # 加载技能库（memory_types.md 包含 5 个提取技能）
+    skills_text = format_skills_from_reference(load_reference("prompts/memory_types.md"))
 
-修正数据:
-{json.dumps(feedback_data, ensure_ascii=False, indent=2)}"""
+    # ── Step 1: LLM Call ──
+    user_prompt = _EXECUTOR_PROMPT.format(
+        email_data=email_text,
+        prediction=prediction,
+        correction=correction,
+        existing_memories=existing_text,
+        skills=skills_text,
+    )
 
-    raw = call_llm(system_prompt, user_prompt)
-    result = parse_json_from_llm(raw)
+    logger.info("调用 LLM (executor)...")
+    raw = call_llm(_SYSTEM_PROMPT, user_prompt)
+    operations = validate_operations(parse_json_array_from_llm(raw))
+
+    if not operations:
+        logger.info("LLM 返回无操作（空数组）")
+        return {"status": "skipped", "reason": "no_operations", "feedback_type": feedback_type}
 
     # ── Step 2: 写入 MemoryBank ──
-    if result.get("skip"):
-        logger.info("偏好提取跳过: %s", result.get("reason"))
-        return {"status": "skipped", "reason": result["reason"]}
+    logger.info("LLM 返回 %d 条操作: %s", len(operations), [op.get("op") for op in operations])
+    count = apply_operations(account_id, operations)
 
-    _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", result)
-
-    logger.info(
-        "记忆已写入: type=%s key=%s",
-        result.get("memory_type"), result.get("memory_key"),
-    )
-    return {"status": "success", "memory": result}
+    logger.info("记忆操作完成: %d/%d 条成功", count, len(operations))
+    return {
+        "status": "success",
+        "operations_total": len(operations),
+        "operations_applied": count,
+        "feedback_type": feedback_type,
+    }
 
 
 def main():

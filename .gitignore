@@ -27,3 +27,4 @@ Thumbs.db
 # Secrets
 Usersa_netrc
 *_netrc
+.secret/

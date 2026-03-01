@@ -110,8 +110,15 @@ def read_user_profile() -> str:
 
 
 def format_memories(memories: dict) -> str:
-    """将 memories API 返回值格式化为 prompt 段落。"""
+    """将 memories API 返回值格式化为 prompt 段落。
+
+    排除以下条目（有专属处理渠道）：
+    - contact.*：已在发件人画像段落单独展示
+    - project.*：project_state 存储备用，暂不注入 prompt
+    """
     items = memories.get("memories", [])
+    excluded = ("contact.", "project.")
+    items = [m for m in items if not any(m.get("memory_key", "").startswith(p) for p in excluded)]
     if not items:
         return "（无历史记忆）"
     lines = []
@@ -121,6 +128,32 @@ def format_memories(memories: dict) -> str:
             content = json.dumps(content, ensure_ascii=False)
         key = m.get("memory_key", "全局")
         lines.append(f"- [{m.get('memory_type', '?')}] {key}: {content}")
+    return "\n".join(lines)
+
+
+def format_sender_profile(memories: dict, sender_email: str) -> str:
+    """从 memories 中提取指定发件人的画像记忆，格式化为 prompt 段落。
+
+    筛选 memory_key 以 contact.{sender_email} 开头的条目，
+    包含关系、职位、信息流向、沟通模式等历史记录。
+    """
+    if not sender_email:
+        return ""
+    items = memories.get("memories", [])
+    prefix = f"contact.{sender_email.lower()}"
+    sender_items = [
+        m for m in items
+        if m.get("memory_key", "").lower().startswith(prefix)
+    ]
+    if not sender_items:
+        return ""
+    lines = []
+    for m in sender_items:
+        content = m.get("memory_content", {})
+        if isinstance(content, dict):
+            content = json.dumps(content, ensure_ascii=False)
+        key = m.get("memory_key", "")
+        lines.append(f"- {key}: {content}")
     return "\n".join(lines)
 
 
@@ -167,12 +200,20 @@ def strip_quoted_content(body: str) -> str:
     cleaned = []
 
     for i, line in enumerate(lines):
-        # "On {date}, {name} wrote:" (English)
-        if re.match(r"^On .+ wrote:\s*$", line, re.IGNORECASE):
-            break
-        # "在 ... 写道：" (Chinese)
-        if re.match(r"^在\s+.+写道[：:]\s*$", line):
-            break
+        # "On {date}, {name} wrote:" — 可能跨两行（Gmail/Outlook 自动换行）
+        if re.match(r"^On\s+", line, re.IGNORECASE):
+            candidate = line.rstrip()
+            if i + 1 < len(lines):
+                candidate = candidate + " " + lines[i + 1].strip()
+            if re.search(r"wrote:\s*$", candidate, re.IGNORECASE):
+                break
+        # "在 ... 写道：" — 同样支持跨两行
+        if re.match(r"^在\s+", line):
+            candidate = line.rstrip()
+            if i + 1 < len(lines):
+                candidate = candidate + " " + lines[i + 1].strip()
+            if re.search(r"写道[：:]\s*$", candidate):
+                break
         # "---------- Forwarded message ----------"
         if re.match(
             r"^-{5,}\s*(Forwarded message|转发的邮件)\s*-{5,}",
@@ -216,6 +257,9 @@ _SIG_PHRASES = [
     r"^顺颂商祺",
     r"^祝好",
     r"^致敬",
+    r"^谢谢",
+    r"^感谢",
+    r"^多谢",
     r"^Sent from my (iPhone|iPad|Galaxy|Android)",
     r"^发自我的",
     r"^Get Outlook for",
@@ -225,7 +269,7 @@ _SIG_PHRASE_RE = re.compile("|".join(_SIG_PHRASES), re.IGNORECASE | re.MULTILINE
 
 
 def strip_signature(body: str) -> str:
-    """移除邮件签名块。仅在正文后 30% 区域搜索，避免误判。"""
+    """移除邮件签名块。在正文后 30% 或末尾 15 行（取较大范围）搜索，避免误判。"""
     if not body:
         return body
     lines = body.splitlines()
@@ -233,7 +277,8 @@ def strip_signature(body: str) -> str:
     if total < 3:
         return body
 
-    search_start = max(0, int(total * 0.7))
+    # 取 30% 和 末尾15行 中更靠前的起点，确保短邮件也能搜到签名
+    search_start = max(0, min(int(total * 0.7), total - 15))
     cut_at = None
 
     for i in range(search_start, total):
@@ -253,11 +298,92 @@ def strip_signature(body: str) -> str:
     return body
 
 
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    """在 limit 字符以内，找最近的段落或句子边界截断，避免切到词/句中间。"""
+    if len(text) <= limit:
+        return text
+    chunk = text[:limit]
+    # 优先：双换行（段落边界）
+    pos = chunk.rfind("\n\n")
+    if pos > limit // 2:
+        return chunk[:pos]
+    # 其次：中英文句尾标点
+    for sep in ("。", "！", "？", ".\n", "!\n", "?\n", ". ", "! ", "? "):
+        pos = chunk.rfind(sep)
+        if pos > limit // 2:
+            return chunk[:pos + len(sep)]
+    # 最后：普通换行
+    pos = chunk.rfind("\n")
+    if pos > limit // 2:
+        return chunk[:pos]
+    return chunk
+
+
+# ─── importance 计算（Python 负责算术，LLM 只负责判断） ───
+
+
+def compute_importance_score(raw_scores: dict) -> tuple:
+    """从 LLM 输出的四维原始分（0-100）计算加权总分和完整 breakdown。"""
+    s = max(0, min(100, int(raw_scores.get("sender_score",     0))))
+    u = max(0, min(100, int(raw_scores.get("urgency_score",    0))))
+    d = max(0, min(100, int(raw_scores.get("deadline_score",   0))))
+    c = max(0, min(100, int(raw_scores.get("complexity_score", 0))))
+    total = s * 0.30 + u * 0.25 + d * 0.25 + c * 0.20
+    breakdown = {
+        "sender_weight":     30, "sender_score":     s, "sender_contrib":     round(s * 0.30, 2),
+        "urgency_weight":    25, "urgency_score":    u, "urgency_contrib":    round(u * 0.25, 2),
+        "deadline_weight":   25, "deadline_score":   d, "deadline_contrib":   round(d * 0.25, 2),
+        "complexity_weight": 20, "complexity_score": c, "complexity_contrib": round(c * 0.20, 2),
+        "total": round(total, 2),
+    }
+    return round(total), breakdown
+
+
+# ─── 默认值补全 ───
+
+_VALID_SENTIMENTS = {"positive", "negative", "neutral"}
+_VALID_LANGUAGES  = {"zh", "en", "ja"}
+
+
+def _apply_defaults(result: dict) -> dict:
+    """为 LLM 输出补全缺失字段，防止下游访问时 KeyError / TypeError。"""
+    # summary
+    summary = result.setdefault("summary", {})
+    summary.setdefault("keywords", [])
+    summary.setdefault("one_line", "")
+    summary.setdefault("brief",    "")
+
+    # action_items
+    if not isinstance(result.get("action_items"), list):
+        result["action_items"] = []
+
+    # metadata
+    meta = result.setdefault("metadata", {})
+    meta.setdefault("category", [])
+    if meta.get("sentiment") not in _VALID_SENTIMENTS:
+        meta["sentiment"] = "neutral"
+    if meta.get("language") not in _VALID_LANGUAGES:
+        meta["language"] = "zh"
+    conf = meta.get("confidence")
+    meta["confidence"] = (
+        max(0.0, min(1.0, float(conf))) if isinstance(conf, (int, float)) else 0.0
+    )
+    meta.setdefault("is_spam",           False)
+    meta.setdefault("importance_scores", {})
+    meta.setdefault("suggested_reply",   None)
+    meta.setdefault("reply_stances",     [])
+
+    # pending_facts
+    if not isinstance(result.get("pending_facts"), list):
+        result["pending_facts"] = []
+
+    return result
+
+
 # ─── 列表长度限制 ───
 
 _LIST_LIMITS = {
     "keywords": 8,
-    "key_points": 5,
     "action_items": 10,
     "reply_stances": 4,
     "category": 4,
@@ -269,11 +395,10 @@ def _enforce_list_limits(analysis: dict) -> dict:
     summary = analysis.get("summary", {})
     metadata = analysis.get("metadata", {})
 
-    for field in ("keywords", "key_points"):
-        lst = summary.get(field)
-        if isinstance(lst, list) and len(lst) > _LIST_LIMITS[field]:
-            logger.info("截断 summary.%s: %d → %d", field, len(lst), _LIST_LIMITS[field])
-            summary[field] = lst[: _LIST_LIMITS[field]]
+    lst = summary.get("keywords")
+    if isinstance(lst, list) and len(lst) > _LIST_LIMITS["keywords"]:
+        logger.info("截断 summary.keywords: %d → %d", len(lst), _LIST_LIMITS["keywords"])
+        summary["keywords"] = lst[: _LIST_LIMITS["keywords"]]
 
     items = analysis.get("action_items")
     if isinstance(items, list) and len(items) > _LIST_LIMITS["action_items"]:
@@ -292,13 +417,13 @@ def _enforce_list_limits(analysis: dict) -> dict:
 # ─── 入口1：分析新邮件 ───
 
 
-def analyze_email(email_id: str, account_id: str) -> dict:
+def analyze_email(email_id: str, account_id: str, is_sent: bool = False) -> dict:
     """
     完整邮件分析流程（脚本控制，LLM 只回答问题）。
 
     Step 0: 从 ClawMail REST API 获取数据
-    Step 1: LLM Call 1 — 邮件分析（summary + categories + importance + actions + stances）
-    Step 2: LLM Call 2 — 事实提取（pending facts）
+    Step 1: 单次 LLM 调用（分析 + 事实提取合并）
+    Step 2: 后处理（默认值补全 → 列表截断 → Python 计算 importance → 提取 facts）
     Step 3: 写回结果
     """
     logger.info("开始分析邮件 email_id=%s account_id=%s", email_id, account_id)
@@ -328,43 +453,113 @@ def analyze_email(email_id: str, account_id: str) -> dict:
 
     logger.info("数据获取完成: email subject=%s", email.get("subject", ""))
 
-    # ── Step 1: LLM Call 1 — 邮件分析 ──
-    analysis_system = _build_analysis_system_prompt(user_profile, memories, thread_context)
-    analysis_user = _build_email_user_prompt(email)
-    analysis_raw = call_llm(analysis_system, analysis_user)
-    analysis = parse_json_from_llm(analysis_raw, "object")
-    analysis = _enforce_list_limits(analysis)
+    # ── Step 1: 单次 LLM 调用（分析 + 事实提取合并） ──
+    # 已发送邮件：contact.* 记忆应以收件人为 key，而非发件人（用户自己）
+    if is_sent:
+        to_addrs = email.get("to_addresses") or []
+        first = to_addrs[0] if to_addrs else {}
+        sender_email = first.get("email", "") if isinstance(first, dict) else str(first)
+    else:
+        sender_email = (email.get("from_address") or {}).get("email", "")
+    system_prompt = _build_analysis_system_prompt(
+        user_profile, memories, thread_context, pending_facts, sender_email,
+        is_sent=is_sent,
+    )
+    user_prompt = _build_email_user_prompt(email, is_sent=is_sent)
+    raw = call_llm(system_prompt, user_prompt)
+    result = parse_json_from_llm(raw, "object")
+    result = _apply_defaults(result)
+    result = _enforce_list_limits(result)
 
-    logger.info("邮件分析完成: importance=%s", analysis.get("metadata", {}).get("importance_score"))
+    # ── Step 2: 后处理（Python 计算 importance，提取 facts） ──
+    metadata = result.setdefault("metadata", {})
 
-    # ── Step 2: LLM Call 2 — 事实提取 ──
-    extraction_system = _build_extraction_system_prompt(user_profile, pending_facts)
-    extraction_user = _build_email_user_prompt(email)
-    facts_raw = call_llm(extraction_system, extraction_user)
-    facts = parse_json_from_llm(facts_raw, "array")
+    if is_sent:
+        # 已发送邮件：LLM 只输出 summary + pending_facts，手动补全其余字段默认值
+        result.setdefault("action_items", [])
+        metadata["is_spam"] = False
+        metadata.pop("importance_scores", None)
+        metadata["importance_score"] = 0
+        metadata["importance_breakdown"] = {}
+        metadata.setdefault("category", [])
+        metadata.setdefault("sentiment", "neutral")
+        metadata.setdefault("confidence", 0.8)
+        metadata.setdefault("suggested_reply", None)
+        metadata.setdefault("reply_stances", [])
+        logger.info("已发送邮件，跳过 spam/importance，补全默认值")
+    else:
+        is_spam = metadata.get("is_spam", False)
+        if is_spam:
+            logger.info("检测为垃圾邮件，importance_score 强制为 0")
+            metadata["importance_score"] = 0
+            metadata["importance_breakdown"] = {}
+        else:
+            raw_scores = metadata.pop("importance_scores", {})
+            score, breakdown = compute_importance_score(raw_scores)
+            metadata["importance_score"] = score
+            metadata["importance_breakdown"] = breakdown
+            logger.info("邮件分析完成: importance_score=%d", score)
+
+    # 从合并结果中取出 pending_facts（不写入 ai-metadata）
+    facts = result.pop("pending_facts", [])
     if not isinstance(facts, list):
         facts = []
-
     logger.info("事实提取完成: %d 个 facts", len(facts))
 
+    # 按 fact_key 分流：
+    #   contact.*                          → 直接写 MemoryBank（关系记忆，立即生效）
+    #   project.*.phase / project.*.deadline → 直接写 MemoryBank（动态状态，立即生效）
+    #   其他（career/org/project.*.role）  → pending 池，积累后 promote 到 USER.md
+    _PROJECT_STATE_SUFFIXES = (".phase", ".deadline")
+
+    def _is_direct_fact(f: dict) -> bool:
+        key = f.get("fact_key", "")
+        if key.startswith("contact."):
+            return True
+        if key.startswith("project.") and any(key.endswith(s) for s in _PROJECT_STATE_SUFFIXES):
+            return True
+        return False
+
+    direct_facts  = [f for f in facts if _is_direct_fact(f)]
+    profile_facts = [f for f in facts if not _is_direct_fact(f)]
+
     # ── Step 3: 写回结果 ──
-    api_post(f"/emails/{email_id}/ai-metadata", analysis)
+    api_post(f"/emails/{email_id}/ai-metadata", result)
     logger.info("AI metadata 已写入")
 
-    if facts:
-        source_email_id = email_id
-        facts_with_source = []
-        for f in facts:
-            f["source_email_id"] = source_email_id
-            facts_with_source.append(f)
-        api_post(f"/pending-facts/{account_id}", {"facts": facts_with_source})
+    if direct_facts:
+        today = datetime.today().date().isoformat()
+        for f in direct_facts:
+            content = f.get("fact_content", "")
+            # project_state 类型自动注入提取日期，方便未来清理判断
+            if f.get("fact_category") == "project_state":
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except (json.JSONDecodeError, ValueError):
+                        content = {"raw": content}
+                if isinstance(content, dict):
+                    content.setdefault("extracted_date", today)
+            api_post(f"/memories/{account_id}", {
+                "memory_type":      f.get("fact_category", "contact"),
+                "memory_key":       f.get("fact_key", ""),
+                "memory_content":   content,
+                "confidence_score": float(f.get("confidence", 0.5)),
+                "evidence_count":   1,
+            })
+        logger.info("direct facts 直接写入 MemoryBank: %d 条", len(direct_facts))
+
+    if profile_facts:
+        for f in profile_facts:
+            f["source_email_id"] = email_id
+        api_post(f"/pending-facts/{account_id}", {"facts": profile_facts})
         api_post(f"/pending-facts/{account_id}/promote")
-        logger.info("Pending facts 已写入并触发提升检查")
+        logger.info("profile facts 写入 pending 池并触发提升检查: %d 条", len(profile_facts))
 
     return {
         "status": "success",
         "email_id": email_id,
-        "importance_score": analysis.get("metadata", {}).get("importance_score"),
+        "importance_score": result.get("metadata", {}).get("importance_score"),
         "facts_count": len(facts),
     }
 
@@ -374,14 +569,73 @@ def analyze_email(email_id: str, account_id: str) -> dict:
 
 def _build_analysis_system_prompt(
     user_profile: str, memories: dict, thread_context: list = None,
+    pending_facts: dict = None, sender_email: str = "",
+    is_sent: bool = False,
 ) -> str:
-    """构建邮件分析的 system prompt。"""
-    summary_guide = load_reference("prompts/summary_guide.md")
-    importance_algo = load_reference("prompts/importance_algorithm.md")
-    category_rules = load_reference("prompts/category_rules.md")
-    field_defs = load_reference("specs/field_definitions.md")
-    output_schema = load_reference("specs/output_schema.md")
-    memory_section = format_memories(memories)
+    """构建 system prompt。is_sent=True 时走轻量路径（仅摘要 + 事实）。"""
+    extraction_rules = load_reference("prompts/profile_extraction.md")
+    memory_section   = format_memories(memories)
+    existing_facts   = json.dumps(
+        (pending_facts or {}).get("facts", []), ensure_ascii=False
+    )
+
+    # 联系人画像（收件邮件=发件人画像，已发送=收件人画像）
+    profile_text = format_sender_profile(memories, sender_email)
+    if is_sent:
+        profile_section = (
+            f"\n## 收件人画像（历史记忆）\n{profile_text}\n"
+            if profile_text else ""
+        )
+    else:
+        profile_section = (
+            f"\n## 发件人画像（历史记忆）\n{profile_text}\n"
+            if profile_text else ""
+        )
+
+    # ── 已发送邮件：轻量 prompt ──
+    if is_sent:
+        sent_guide = load_reference("prompts/sent_email_guide.md")
+        return f"""你是一个邮件分析助手。请分析用户发出的邮件，完成摘要和事实提取。
+
+## 用户侧写
+{user_profile}
+
+## 用户偏好记忆
+{memory_section}
+{profile_section}
+## 已发送邮件分析指南
+{sent_guide}
+
+## 用户事实提取规则
+{extraction_rules}
+
+## 已有 pending facts（避免重复提取）
+{existing_facts}
+
+## 输出格式
+严格输出以下 JSON，不要输出任何其他内容：
+
+{{
+  "summary": {{
+    "keywords": ["最多5个关键词"],
+    "one_line": "30字以内概括用户做了什么/说了什么",
+    "brief": "1-3行摘要"
+  }},
+  "pending_facts": [
+    {{"fact_key": "contact.recipient@example.com.relationship", "fact_category": "contact", "fact_content": "...", "confidence": 0.0}}
+  ]
+}}
+
+**重要规则**：
+- 这是用户自己发出的邮件，contact.* 的 key 必须以收件人 email 为前缀
+- one_line 概括"用户做了什么"，不是"收到了什么"
+- 每封邮件最多提取 3 个 facts
+- brief 必须基于原文，不得推断"""
+
+    # ── 收件邮件：完整 prompt ──
+    summary_guide    = load_reference("prompts/summary_guide.md")
+    importance_algo  = load_reference("prompts/importance_algorithm.md")
+    category_rules   = load_reference("prompts/category_rules.md")
 
     # 线程上下文段落（仅回复邮件才有）
     thread_section = ""
@@ -401,64 +655,98 @@ def _build_analysis_system_prompt(
             + thread_guide
         )
 
-    return f"""你是一个邮件分析助手。请严格按照以下规则分析邮件。
+    return f"""你是一个邮件分析助手。请一次性完成邮件分析和用户事实提取两项任务。
 
 ## 用户侧写
 {user_profile}
 
 ## 用户偏好记忆
 {memory_section}
-{thread_section}
+{profile_section}{thread_section}
 ## 摘要规则
 {summary_guide}
 
-## 重要性评分算法
+## 重要性评分规则
 {importance_algo}
 
 ## 分类规则
 {category_rules}
 
-## 输出字段定义
-{field_defs}
-
-## 输出格式
-请严格输出 JSON，格式如下：
-{output_schema}
-
-不要输出任何 JSON 之外的内容。"""
-
-
-def _build_extraction_system_prompt(user_profile: str, pending_facts: dict) -> str:
-    """构建事实提取的 system prompt。"""
-    extraction_rules = load_reference("prompts/profile_extraction.md")
-    existing_facts = json.dumps(
-        pending_facts.get("facts", []), ensure_ascii=False, indent=2
-    )
-
-    return f"""你是一个用户信息提取助手。从邮件中提取关于收件人（用户）的事实性信息。
-
-## 提取规则
+## 用户事实提取规则
 {extraction_rules}
 
-## 用户当前侧写
-{user_profile}
-
-## 已有的 pending facts（避免重复）
+## 已有 pending facts（避免重复提取）
 {existing_facts}
 
-请输出 JSON 数组，格式为：
-[{{"fact_key": "...", "fact_category": "...", "fact_content": "...", "confidence": 0.0}}]
+## 输出格式
+严格输出以下 JSON，不要输出任何其他内容：
 
-如果没有可提取的信息，输出空数组 []。
-不要输出任何 JSON 之外的内容。"""
+{{
+  "summary": {{
+    "keywords": ["最多8个关键词"],
+    "one_line": "30字以内核心概括，如有具体数字/日期/金额请包含",
+    "brief": "3-5行摘要，严格基于邮件原文，不得推断或补充原文未提及的内容"
+  }},
+  "action_items": [
+    {{
+      "text": "行动描述（动词开头，50字以内）",
+      "deadline": "YYYY-MM-DD或null",
+      "deadline_source": "explicit|inferred|null",
+      "priority": "high|medium|low",
+      "category": "工作|学习|生活|个人",
+      "assignee": "me|sender|other",
+      "quote": "原文引用（50字以内）"
+    }}
+  ],
+  "metadata": {{
+    "category": ["最多4个分类标签"],
+    "sentiment": "positive|negative|neutral",
+    "language": "zh|en|ja",
+    "confidence": 0.0,
+    "is_spam": false,
+    "importance_scores": {{
+      "sender_score": 0,
+      "urgency_score": 0,
+      "deadline_score": 0,
+      "complexity_score": 0
+    }},
+    "suggested_reply": "建议回复或null",
+    "reply_stances": ["最多4个立场选项"]
+  }},
+  "pending_facts": [
+    {{"fact_key": "career.position", "fact_category": "career", "fact_content": "...", "confidence": 0.0}}
+  ]
+}}
+
+importance_scores 说明：四个维度各自独立打分（0-100），不需要计算总分，Python 会完成加权计算。
+- sender_score：发件人身份重要性（如有发件人画像记忆，优先依据记忆中的关系打分）
+- urgency_score：正文紧急程度
+- deadline_score：截止时间紧迫性
+- complexity_score：任务复杂度
+
+**防幻觉规则（严格遵守）**：
+- brief 和 action_items 必须有邮件原文对应依据，不得凭空推断
+- 如邮件无明确待办，action_items 返回空数组 []
+- 如邮件无截止日期，deadline 返回 null，deadline_source 返回 null
+
+is_spam 为 true 时，pending_facts 返回空数组 []。"""
 
 
-def _build_email_user_prompt(email: dict) -> str:
-    """构建邮件的 user prompt（分析和提取共用）。"""
+def _build_email_user_prompt(email: dict, is_sent: bool = False) -> str:
+    """构建邮件的 user prompt。is_sent=True 时省略发件人（就是用户自己）。"""
     body = email.get("body_text", "")
     body = strip_quoted_content(body)
     body = strip_signature(body)
-    body = body[:4000]
+    body = _truncate_at_boundary(body, 4000)
+    if is_sent:
+        return f"""请分析以下用户发出的邮件：
+
+主题: {email.get('subject', '')}
+收件人: {json.dumps(email.get('to_addresses', []), ensure_ascii=False)}
+抄送: {json.dumps(email.get('cc_addresses', []), ensure_ascii=False)}
+时间: {email.get('received_at', '')}
+正文:
+{body}"""
     return f"""请分析以下邮件：
 
 主题: {email.get('subject', '')}
@@ -500,6 +788,7 @@ def main():
     )
     parser.add_argument("--model", default="kimi-k2.5", help="LLM 模型名称")
     parser.add_argument("--llm-token", default="", help="LLM Gateway auth token")
+    parser.add_argument("--is-sent", action="store_true", default=False, help="是否为已发送邮件")
     args = parser.parse_args()
 
     # 更新全局配置
@@ -510,7 +799,7 @@ def main():
     LLM_TOKEN = args.llm_token
 
     try:
-        result = analyze_email(args.email_id, args.account_id)
+        result = analyze_email(args.email_id, args.account_id, is_sent=args.is_sent)
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
     except urllib.error.URLError as e:

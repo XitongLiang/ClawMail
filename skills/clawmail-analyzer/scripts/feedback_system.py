@@ -142,7 +142,7 @@ def get_user_preferences() -> Dict:
     
     if improvement_areas.get("too_short", 0) > 2:
         preferences["detail_level"] = "detailed"
-        preferences["style_adjustments"]["min_key_points"] = 5
+        preferences["style_adjustments"]["min_brief_lines"] = 5
     
     if improvement_areas.get("missing_deadline", 0) > 2:
         preferences["focus_areas"].append("deadline")

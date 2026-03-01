@@ -99,16 +99,17 @@ class AIService(QObject):
         if not email:
             return
 
-        # 跳过草稿、回收站、已发送（垃圾邮件需 AI 判断真假）
-        if email.folder in ("草稿箱", "已删除", "已发送"):
+        # 跳过草稿、回收站（垃圾邮件需 AI 判断真假；已发送提取摘要和联系人记忆）
+        if email.folder in ("草稿箱", "已删除"):
             return
 
+        is_sent = email.folder == "已发送"
         self.processing_started.emit(email_id, self._queue.qsize())
         last_error = ""
         for attempt in range(MAX_RETRIES):
             try:
                 meta = await loop.run_in_executor(
-                    None, self._processor.process_email, email, email.account_id
+                    None, self._processor.process_email, email, email.account_id, is_sent
                 )
                 self._db.update_email_ai_metadata(meta)
                 # 双向垃圾邮件检测：根据 is_spam 结果自动移动邮件
