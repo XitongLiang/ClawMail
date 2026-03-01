@@ -118,6 +118,24 @@
 
 ---
 
+### Phase 5b：Skill-Driven 迁移（AI 层重构）
+
+**目标**：将 AI 逻辑从 ClawMail 内部迁移到外部 OpenClaw Skill 脚本
+
+| 模块 | 交付内容 |
+|-----|---------|
+| 数据层 | 新增 `pending_facts` 表、`user_preference_memory` 表、`skill_bank` 表 |
+| REST API | 新增 9 个端点供 Skill 读写数据（邮件、记忆、pending facts） |
+| AI 层重构 | `ai_processor.py` 改为 subprocess 调用 skill 脚本，保留 fallback |
+| 习惯提取 | 用户发送邮件后触发 analyzer skill 提取撰写习惯 |
+| 事实累积 | Pending facts 置信度累加机制 + 自动提升到 USER.md |
+
+**里程碑**：Skill 脚本存在时走新路径，不存在时 fallback 到旧路径，两种模式均可正常工作
+
+**已完成**：✅ Phase 1（数据层 + REST API）+ Phase 2（AI 层迁移）ClawMail 侧改动
+
+---
+
 ### Phase 6： polish与扩展
 
 **目标**：产品级体验，个人工作流中心
@@ -147,6 +165,8 @@ Phase 3 (ToDo) ──────────┤  可并行开发
 Phase 4 (AI助手) ────────┘
     ↓
 Phase 5 (搜索)
+    ↓
+Phase 5b (Skill-Driven 迁移) ← ✅ ClawMail 侧已完成
     ↓
 Phase 6 (扩展功能，持续迭代)
 ```

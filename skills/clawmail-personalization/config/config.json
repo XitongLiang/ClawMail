@@ -1,0 +1,35 @@
+{
+    "clawmail_api": {
+        "base_url": "http://127.0.0.1:9999",
+        "timeout": 30,
+        "max_retries": 3
+    },
+    "llm": {
+        "gateway_url": "http://127.0.0.1:18789/v1/chat/completions",
+        "model": "kimi-k2.5",
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "timeout": 60
+    },
+    "paths": {
+        "user_home": "~",
+        "memory_file": "MEMORY.md",
+        "memory_dir": "memory"
+    },
+    "related_prompts": {
+        "importance_score": ["urgency"],
+        "summary": ["outline"],
+        "reply_draft": ["generate_email"]
+    },
+    "feedback_types": [
+        "importance_score",
+        "category",
+        "is_spam",
+        "action_category",
+        "reply_stances",
+        "keywords",
+        "summary",
+        "reply_draft",
+        "polish_email"
+    ]
+}

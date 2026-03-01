@@ -1037,11 +1037,9 @@ class ClawMailApp(QMainWindow):
         # MemSkill 个性化组件初始化
         self._init_memskill()
 
-        if self._ai_bridge:
+        if self._db:
             ai_processor = AIProcessor(
-                self._ai_bridge,
-                self._db.data_dir if self._db else None,
-                memory_bank=self._memory_bank,
+                self._db.data_dir,
             )
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)
@@ -1995,9 +1993,9 @@ class ClawMailApp(QMainWindow):
             return
         from clawmail.ui.components.compose_dialog import ComposeDialog
         ai_proc = None
-        if self._ai_bridge:
+        if self._db:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
+            ai_proc = AIProcessor(self._db.data_dir)
         # 通过 in_reply_to 字段（存储的是源邮件 DB id）恢复源邮件
         source_email = None
         source_ai_meta = None
@@ -2049,9 +2047,9 @@ class ClawMailApp(QMainWindow):
             return
 
         ai_proc = None
-        if self._ai_bridge:
+        if self._db:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
+            ai_proc = AIProcessor(self._db.data_dir)
 
         dlg = ComposeDialog(self._db, self._cred, accs[0],
                             ai_processor=ai_proc, parent=self)
@@ -2078,11 +2076,11 @@ class ClawMailApp(QMainWindow):
         if self._db:
             ai_meta = self._db.get_email_ai_metadata(email.id)
 
-        # 构造 AIProcessor（若已有 ai_bridge）
+        # 构造 AIProcessor
         ai_proc = None
-        if self._ai_bridge:
+        if self._db:
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            ai_proc = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank)
+            ai_proc = AIProcessor(self._db.data_dir)
 
         from_info = email.from_address or {}
         to_addr = from_info.get("email", "")
@@ -3033,7 +3031,7 @@ class ClawMailApp(QMainWindow):
         self.set_sync_service(sync_svc, account_id=account.id)
 
         self._init_memskill()
-        ai_processor = AIProcessor(self._ai_bridge, self._db.data_dir if self._db else None, memory_bank=self._memory_bank) if self._ai_bridge else None
+        ai_processor = AIProcessor(self._db.data_dir) if self._db else None
         if ai_processor:
             ai_svc = AIService(self._db, ai_processor, move_callback=sync_svc.move_email)
             self.set_ai_service(ai_svc)

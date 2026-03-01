@@ -122,6 +122,46 @@ class OpenClawBridge:
 | AI SDK | openai Python SDK | 1.51.0 |
 | 嵌入模型 | sentence-transformers | 3.3.0（**仅 Phase 5**） |
 
+### 1.5b Skill-Driven AI 调用模式（新架构）
+
+ClawMail 不再直接通过 `bridge.user_chat()` 让 LLM 判断调用哪个 skill，而是通过 `subprocess` 直接调用 skill 脚本，确保每个事件触发哪个脚本是**代码写死**的，LLM 只负责在给定 prompt 下产出结构化结果。
+
+**Skill 脚本路径配置：**
+
+```python
+SKILL_BASE = Path.home() / ".openclaw" / "workspace" / "skills"
+ANALYZER_SCRIPT = SKILL_BASE / "clawmail-analyzer" / "scripts" / "analyze_email.py"
+REPLY_SCRIPT    = SKILL_BASE / "clawmail-reply" / "scripts" / "generate_reply.py"
+GENERATE_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "generate_email.py"
+POLISH_SCRIPT   = SKILL_BASE / "clawmail-reply" / "scripts" / "polish_email.py"
+EXECUTOR_SCRIPT = SKILL_BASE / "clawmail-executor" / "scripts" / "extract_preference.py"
+```
+
+**调用模式：**
+
+```python
+# 确定性调用：ClawMail → subprocess → skill 脚本 → 脚本内调 LLM API
+result = subprocess.run(
+    [sys.executable, str(ANALYZER_SCRIPT),
+     "--mode", "analyze",
+     "--email-id", email_id,
+     "--account-id", account_id],
+    capture_output=True, text=True, timeout=120
+)
+```
+
+**Fallback 策略（Phase 1-2）：**
+
+Skill 脚本不存在或执行失败时，自动 fallback 到旧的 prompt-based LLM 调用路径。Phase 3 清理完成后移除 fallback。
+
+**Skill 数据交互：**
+
+Skill 脚本通过 ClawMail 的 REST API（`127.0.0.1:9999`）读写数据：
+- `GET /emails/{id}` — 获取邮件数据
+- `POST /emails/{id}/ai-metadata` — 写入分析结果
+- `GET /memories/{account_id}` — 读取用户偏好记忆
+- `POST /pending-facts/{account_id}` — 写入事实累积
+
 ### 1.6 安全相关
 
 | 组件 | 选型 | 版本 |

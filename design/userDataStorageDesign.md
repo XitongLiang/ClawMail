@@ -328,6 +328,57 @@ CREATE TABLE activity_logs (
 );
 
 -- ============================================
+-- 10. 用户偏好记忆表（MemSkill 个性化）
+-- ============================================
+CREATE TABLE IF NOT EXISTS user_preference_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_account_id TEXT NOT NULL,
+    memory_type TEXT NOT NULL,           -- email_analysis / reply_draft / compose / polish
+    memory_key TEXT,                     -- 关联键（如发件人地址）
+    memory_content TEXT NOT NULL,        -- JSON: 记忆内容
+    confidence_score REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,
+    source_email_ids TEXT DEFAULT '[]',  -- JSON数组：来源邮件ID
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+-- ============================================
+-- 11. Skill Bank（MemSkill 技能演化）
+-- ============================================
+CREATE TABLE IF NOT EXISTS skill_bank (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL UNIQUE,     -- 技能名称（如 clawmail-analyzer）
+    version INTEGER NOT NULL DEFAULT 1,
+    evolved_prompt TEXT,                 -- 演化后的 prompt 内容
+    performance_score REAL DEFAULT 0.0,
+    evolution_count INTEGER DEFAULT 0,
+    last_evolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ============================================
+-- 12. Pending Facts（Skill-Driven 事实累积）
+-- ============================================
+CREATE TABLE IF NOT EXISTS pending_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_account_id TEXT NOT NULL,
+    fact_key TEXT NOT NULL,              -- 事实唯一标识，如 "职业.职位", "联系人.Alice.关系"
+    fact_category TEXT NOT NULL,         -- career, contact, organization, project, writing_habit, communication_style
+    fact_content TEXT NOT NULL,          -- 事实内容（纯文本描述）
+    confidence REAL NOT NULL DEFAULT 0.0,       -- 当前累积置信度 0.0-1.0
+    evidence_count INTEGER NOT NULL DEFAULT 1,  -- 被多少封邮件/事件佐证
+    source_emails TEXT NOT NULL DEFAULT '[]',    -- JSON数组：佐证来源
+    status TEXT NOT NULL DEFAULT 'pending',      -- pending | promoted | dismissed
+    promoted_at TEXT,                   -- 提升到 USER.md 的时间
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+-- ============================================
 -- 索引优化
 -- ============================================
 CREATE INDEX idx_emails_account ON emails(account_id);
@@ -346,6 +397,12 @@ CREATE INDEX idx_tasks_due ON tasks(due_date);
 CREATE INDEX idx_tasks_email ON tasks(source_email_id);
 
 CREATE INDEX idx_attachments_email ON attachments(email_id);
+
+CREATE INDEX idx_user_pref_memory_account ON user_preference_memory(user_account_id, memory_type);
+CREATE UNIQUE INDEX idx_user_pref_memory_key ON user_preference_memory(user_account_id, memory_type, memory_key);
+
+CREATE INDEX idx_pending_facts_account ON pending_facts(user_account_id, status);
+CREATE UNIQUE INDEX idx_pending_facts_key ON pending_facts(user_account_id, fact_key);
 
 -- ============================================
 -- 全文搜索（FTS5）

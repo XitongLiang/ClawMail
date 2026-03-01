@@ -880,6 +880,8 @@ class ComposeDialog(QDialog):
                     conn.commit()
             # ── 隐式反馈：比对 AI 生成 / 润色 与最终版本 ──
             self._record_implicit_feedback(body)
+            # ── Skill-Driven: 触发用户撰写习惯提取 ──
+            self._trigger_habit_extraction(to_addresses, cc_addresses, subject, body)
 
             parent = self.parent()
             if parent and hasattr(parent, "_status_bar"):
@@ -970,6 +972,52 @@ class ComposeDialog(QDialog):
                     user_final=final_body,
                     similarity_ratio=ratio,
                 )
+
+    def _trigger_habit_extraction(self, to_addresses, cc_addresses, subject, body):
+        """Skill-Driven: 邮件发送成功后异步触发用户撰写习惯提取。"""
+        try:
+            from clawmail.infrastructure.ai.ai_processor import HABITS_SCRIPT, GATEWAY_TOKEN
+            if not HABITS_SCRIPT.exists():
+                return
+            import json as _json2
+            import subprocess as _sp
+            import sys as _sys
+
+            parent = self.parent()
+            account_id = ""
+            if parent and hasattr(parent, "_current_account") and parent._current_account:
+                account_id = parent._current_account.id
+
+            compose_data = _json2.dumps({
+                "to_addresses": to_addresses,
+                "cc_addresses": cc_addresses or [],
+                "subject": subject,
+                "body": body[:4000],
+                "account_id": account_id,
+                "is_reply": self._source_email is not None,
+            }, ensure_ascii=False)
+
+            cmd = [_sys.executable, str(HABITS_SCRIPT),
+                   "--compose-data", compose_data,
+                   "--account-id", account_id]
+            if GATEWAY_TOKEN:
+                cmd.extend(["--llm-token", GATEWAY_TOKEN])
+
+            async def _run():
+                import asyncio
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: _sp.run(
+                        cmd,
+                        capture_output=True, text=True, timeout=120
+                    )
+                )
+
+            import asyncio as _aio2
+            _aio2.ensure_future(_run())
+        except Exception as e:
+            print(f"[Skill-Driven] 习惯提取触发失败: {e}")
 
     async def _send_via_graph(self, to_addresses, cc_addresses, subject, body,
                               html_body, attachments):

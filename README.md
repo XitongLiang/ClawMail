@@ -35,12 +35,14 @@
 - **Search & filter** — keyword search across subject/body/AI summaries; advanced filter by sender, date range, read status, and flag status
 - **Context menu** — pin, flag, mark unread, delete, restore from trash, permanently delete
 
-### AI Processing
-- **Automatic pipeline** — every new email triggers a single OpenClaw/Kimi API call that produces all of the below in one round-trip
+### AI Processing (Skill-Driven Architecture)
+- **Skill-driven pipeline** — email analysis is delegated to external OpenClaw skill scripts via `subprocess`, with deterministic execution flow (LLM only answers questions within scripts, not controlling flow)
+- **Direct script invocation** — ClawMail calls skill scripts directly (e.g. `analyze_email.py`), not through LLM routing, ensuring reliable execution
 - **One-line summary** — shown in the email list as a preview subtitle
 - **Smart classification** — 6 system tags (urgent, pending reply, notification, subscription, meeting, approval) plus dynamic project tags; clickable sidebar filter
 - **Task extraction** — action items from email body are surfaced automatically in the To Do panel
-- **AI feedback** — 1–5 star rating + comment on any AI summary; feedback logged for model improvement
+- **User profile building** — pending facts system accumulates user information (career, contacts, projects) with confidence scoring; facts promote to `USER.md` when reaching category-specific thresholds
+- **Graceful fallback** — if skill scripts are unavailable, falls back to legacy prompt-based processing via OpenClawBridge
 - **Offline graceful degradation** — if AI is unavailable, emails appear immediately with a `⚠` badge and are queued for later analysis
 
 ### To Do Panel
@@ -257,6 +259,22 @@ Old prompts are archived to `~/clawmail_data/prompts/archive/` for version track
 
 ClawMail exposes a local API at `http://127.0.0.1:9999` for OpenClaw skills:
 
+#### Skill-Driven Data Endpoints (New)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/emails/unprocessed` | GET | List emails awaiting AI analysis |
+| `/emails/{email_id}` | GET | Get full email data (body truncated to 4000 chars) |
+| `/emails/{email_id}/ai-metadata` | GET | Get existing AI analysis results |
+| `/emails/{email_id}/ai-metadata` | POST | Skill writes analysis results |
+| `/memories/{account_id}` | GET | Get user preference memories (MemoryBank) |
+| `/memories/{account_id}` | POST | Write user preference memory |
+| `/pending-facts/{account_id}` | GET | Get pending user profile facts |
+| `/pending-facts/{account_id}` | POST | Write pending facts (with confidence accumulation) |
+| `/pending-facts/{account_id}/promote` | POST | Promote qualified facts to USER.md |
+
+#### Personalization Endpoints (Legacy)
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/personalization/feedback/{type}` | GET | Read feedback data (JSON array) |
@@ -379,7 +397,7 @@ ClawMail/
 │   │   │   └── microsoft_graph_oauth.py # Device-code flow helpers
 │   │   ├── ai/
 │   │   │   ├── openclawbridge.py        # OpenClaw ↔ openai SDK bridge (sync, streamed)
-│   │   │   ├── ai_processor.py          # Prompt building + JSON response parsing
+│   │   │   ├── ai_processor.py          # Skill-Driven: subprocess → skill scripts (fallback: legacy prompt)
 │   │   │   └── agent_registry.py        # Multi-agent configuration (6 agents)
 │   │   └── security/
 │   │       └── credential_manager.py    # CredentialManager — keyring + Fernet
@@ -410,7 +428,7 @@ ClawMail/
 
 ### Data Flow
 
-#### Email Sync & AI Processing
+#### Email Sync & AI Processing (Skill-Driven)
 ```
 IMAP server
     │  aioimaplib (async)
@@ -419,13 +437,23 @@ SyncService.start(account)
     │  email_synced signal
     ▼
 AIService.enqueue(email_id)
-    │  run_in_executor (OpenClaw is sync)
+    │  run_in_executor
     ▼
-AIProcessor → OpenClawBridge → OpenClaw (local) → Kimi K2.5
-    │  Agent: mailAgent001
-    │  JSON: { summary, category, sentiment, action_items }
-    ▼
-ClawDB.update_email_ai(…)
+AIProcessor.process_email()
+    │  Priority: skill script → fallback legacy
+    ├─── [Skill Path] subprocess → analyze_email.py
+    │      │  Script calls LLM API internally
+    │      │  Script writes results via REST API → ClawDB
+    │      │  Script extracts pending facts → REST API → pending_facts table
+    │      ▼
+    │    ClawDB (results already written)
+    │
+    └─── [Fallback] OpenClawBridge → OpenClaw → Kimi K2.5
+           │  Agent: mailAgent001
+           │  JSON: { summary, category, sentiment, action_items }
+           ▼
+         ClawDB.update_email_ai(…)
+    │
     │  email_processed signal (Qt, main thread)
     ▼
 ClawMailApp — refreshes email list item in place
@@ -529,6 +557,7 @@ To remove an account, select **Remove Current Account** from the dropdown. All l
 | 4 — AI assistant | ✅ Done | AI chat panel, streaming, compose assist, feedback rating |
 | Multi-account | ✅ Done | Account switcher, modern login dialog, Microsoft OAuth |
 | Multi-agent system | ✅ Done | 6 specialized agents, personalization learning, cross-agent memory |
+| Skill-Driven migration | ✅ Done | AI logic → OpenClaw skill scripts, pending_facts table, 9 new REST APIs, subprocess invocation with fallback |
 | 5 — Search & threads | 🔜 Planned | ChromaDB semantic search, email thread grouping |
 | 6 — Polish & expand | 🔜 Planned | Calendar sync, mobile, plugin marketplace, collaboration |
 
@@ -544,12 +573,13 @@ All architecture and design decisions are documented in the `design/` folder:
 | `framework.md` | Module structure, layered architecture, data flow diagrams |
 | `UIDesign.md` | UI wireframes, interaction rules, keyboard shortcuts |
 | `plan.md` | Phase-by-phase development roadmap |
-| `userDataStorageDesign.md` | SQLite schema, table definitions, FTS5 triggers |
+| `userDataStorageDesign.md` | SQLite schema (12 tables incl. pending_facts), FTS5 triggers |
 | `emailFileDesign.md` | Email model, MIME parsing, attachment handling |
 | `ToDoListDesign.md` | Task model, status state machine, UI interactions |
 | `ClawConnect.md` | OpenClaw AI gateway integration protocol |
-| `prompt.md` | AI prompt templates and output format specifications |
-| `PersonalizationPlan.md` | Multi-agent system architecture, personalization workflow |
+| `SkillDrivenMigration.md` | Skill-Driven architecture migration plan (ClawMail → OpenClaw Skills) |
+| `SkillDesign.md` | OpenClaw Skill implementation design (analyzer, reply, executor) |
+| `ClawMailChanges.md` | ClawMail-side changes for Skill-Driven migration |
 
 ---
 

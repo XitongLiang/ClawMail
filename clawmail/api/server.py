@@ -233,10 +233,9 @@ async def reply(req: ReplyRequest):
     def _open():
         # 用 _ai_bridge 动态构建 AIProcessor（与 app.py._on_reply 一致）
         ai_processor = None
-        if _window and getattr(_window, "_ai_bridge", None):
+        if _window and getattr(_window, "_db", None):
             from clawmail.infrastructure.ai.ai_processor import AIProcessor
-            _data_dir = _window._db.data_dir if getattr(_window, "_db", None) else None
-            ai_processor = AIProcessor(_window._ai_bridge, _data_dir)
+            ai_processor = AIProcessor(_window._db.data_dir)
         
         # 格式化收件人和抄送
         to_str = ", ".join([a.get("email", "") for a in to_addresses])
@@ -741,8 +740,60 @@ async def send_reply(req: SendReplyRequest):
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, lambda: _window._email_list.viewport().update())
 
+    # Skill-Driven: 触发用户撰写习惯提取
+    _trigger_compose_habit_extraction(
+        account_id=account.id,
+        to_addresses=to_addresses,
+        cc_addresses=cc_addresses,
+        subject=subject,
+        body=req.reply_body,
+    )
+
     sent_at = datetime.utcnow().isoformat()
     return {"success": True, "sent_at": sent_at}
+
+
+def _trigger_compose_habit_extraction(
+    account_id: str, to_addresses: list, cc_addresses: list,
+    subject: str, body: str,
+) -> None:
+    """Skill-Driven: 异步触发用户撰写习惯提取（不阻塞 HTTP 响应）。"""
+    try:
+        from clawmail.infrastructure.ai.ai_processor import HABITS_SCRIPT, GATEWAY_TOKEN
+        if not HABITS_SCRIPT.exists():
+            return
+
+        import subprocess as _sp
+        import sys as _sys
+
+        compose_data = json.dumps({
+            "to_addresses": to_addresses,
+            "cc_addresses": cc_addresses or [],
+            "subject": subject,
+            "body": body[:4000],
+            "account_id": account_id,
+            "is_reply": True,
+        }, ensure_ascii=False)
+
+        cmd = [_sys.executable, str(HABITS_SCRIPT),
+               "--compose-data", compose_data,
+               "--account-id", account_id]
+        if GATEWAY_TOKEN:
+            cmd.extend(["--llm-token", GATEWAY_TOKEN])
+
+        async def _run():
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: _sp.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=120
+                )
+            )
+
+        asyncio.ensure_future(_run())
+    except Exception as e:
+        print(f"[Skill-Driven] 习惯提取触发失败: {e}")
 
 
 # ── UI 控制接口 ──
@@ -947,11 +998,6 @@ class ArchiveFeedbackRequest(BaseModel):
     feedback_type: str
 
 
-class UpdatePromptRequest(BaseModel):
-    prompt_type: str
-    content: str
-
-
 @app.post("/personalization/status")
 async def personalization_status(req: PersonalizationStatusRequest):
     """OpenClaw skill 完成个性化更新后的回调。"""
@@ -983,17 +1029,6 @@ async def get_feedback(feedback_type: str):
     return {"records": records, "count": len(records)}
 
 
-@app.get("/personalization/prompt/{prompt_type}")
-async def get_prompt(prompt_type: str):
-    """返回指定类型的当前 prompt 内容。"""
-    _check_ready()
-    prompt_file = _db.data_dir / "prompts" / f"{prompt_type}.txt"
-    if not prompt_file.exists():
-        raise HTTPException(status_code=404, detail=f"Prompt not found: {prompt_type}")
-    content = prompt_file.read_text(encoding="utf-8")
-    return {"prompt_type": prompt_type, "content": content}
-
-
 @app.post("/personalization/archive-feedback")
 async def archive_feedback(req: ArchiveFeedbackRequest):
     """将已消费的反馈文件归档到子目录，清空主文件。"""
@@ -1009,20 +1044,215 @@ async def archive_feedback(req: ArchiveFeedbackRequest):
     return {"success": True}
 
 
-@app.post("/personalization/update-prompt")
-async def update_prompt(req: UpdatePromptRequest):
-    """备份旧 prompt 并写入新版本。"""
+# ── Skill-Driven: 邮件数据端点 ──
+
+
+@app.get("/emails/unprocessed")
+async def get_unprocessed_emails(account_id: str, limit: int = 20):
+    """Skill 获取待分析的邮件列表。"""
     _check_ready()
-    import shutil
-    prompts_dir = _db.data_dir / "prompts"
-    prompt_file = prompts_dir / f"{req.prompt_type}.txt"
-    archive_dir = prompts_dir / "archive"
-    archive_dir.mkdir(exist_ok=True)
-    if prompt_file.exists():
-        date_str = datetime.utcnow().strftime("%Y-%m-%d")
-        shutil.copy2(str(prompt_file), str(archive_dir / f"{req.prompt_type}_{date_str}.txt"))
-    prompt_file.write_text(req.content, encoding="utf-8")
-    return {"success": True}
+    emails = _db.get_unprocessed_emails(account_id, limit=limit)
+    return {"emails": emails, "total": len(emails)}
+
+
+@app.get("/emails/thread/{thread_id}")
+async def get_thread_emails(thread_id: str, limit: int = 20):
+    """Skill 获取同一线程的邮件列表（含 AI 摘要），按时间升序。"""
+    _check_ready()
+    emails = _db.get_thread_emails(thread_id, limit=limit)
+    return {"emails": emails, "thread_id": thread_id, "count": len(emails)}
+
+
+@app.get("/emails/{email_id}")
+async def get_email(email_id: str):
+    """Skill 获取邮件完整数据。"""
+    _check_ready()
+    email = _db.get_email_full(email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+    return email
+
+
+@app.get("/emails/{email_id}/ai-metadata")
+async def get_ai_metadata(email_id: str):
+    """Skill 获取已有的 AI 分析结果。"""
+    _check_ready()
+    meta = _db.get_email_ai_metadata(email_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="AI metadata not found")
+    return {
+        "email_id": meta.email_id,
+        "summary": meta.summary,
+        "categories": meta.categories,
+        "sentiment": meta.sentiment,
+        "is_spam": meta.is_spam,
+        "importance_score": meta.importance_score,
+        "action_items": meta.action_items,
+        "reply_stances": meta.reply_stances,
+        "ai_status": meta.ai_status,
+        "processed_at": meta.processed_at.isoformat() if meta.processed_at else None,
+    }
+
+
+@app.post("/emails/{email_id}/ai-metadata")
+async def write_ai_metadata(email_id: str, body: dict):
+    """Analyzer skill 写入分析结果。"""
+    _check_ready()
+    metadata = body.get("metadata", {})
+    from clawmail.domain.models.email import EmailAIMetadata
+    meta = EmailAIMetadata(
+        email_id=email_id,
+        summary=body.get("summary", {}),
+        categories=metadata.get("category", []),
+        sentiment=metadata.get("sentiment", "neutral"),
+        suggested_reply=metadata.get("suggested_reply"),
+        is_spam=metadata.get("is_spam", False),
+        action_items=body.get("action_items", []),
+        reply_stances=metadata.get("reply_stances", []),
+        importance_score=metadata.get("importance_score", 50),
+        ai_status="processed",
+        processing_progress=100,
+        processing_stage="completed",
+        processed_at=datetime.utcnow(),
+    )
+    _db.update_email_ai_metadata(meta)
+    return {"status": "ok"}
+
+
+# ── Skill-Driven: Memory 端点 ──
+
+
+@app.get("/memories/{account_id}")
+async def get_memories(account_id: str, memory_type: str = None, memory_key: str = None):
+    """Skill 获取用户偏好记忆（MemoryBank）。"""
+    _check_ready()
+    if memory_type:
+        memories = _db.get_memories_by_type(account_id, memory_type)
+    elif memory_key:
+        memories = _db.get_memories_for_sender(account_id, memory_key)
+    else:
+        memories = _db.get_all_memories(account_id)
+    return {
+        "memories": [
+            {
+                "id": m.id,
+                "memory_type": m.memory_type,
+                "memory_key": m.memory_key,
+                "memory_content": m.memory_content,
+                "confidence_score": m.confidence_score,
+                "evidence_count": m.evidence_count,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "last_updated": m.last_updated.isoformat() if m.last_updated else None,
+            }
+            for m in memories
+        ]
+    }
+
+
+@app.post("/memories/{account_id}")
+async def write_memory(account_id: str, body: dict):
+    """Executor skill 写入偏好记忆。"""
+    _check_ready()
+    from clawmail.domain.models.memory import UserMemory
+    memory = UserMemory(
+        id=str(uuid.uuid4()),
+        user_account_id=account_id,
+        memory_type=body["memory_type"],
+        memory_key=body.get("memory_key"),
+        memory_content=body.get("memory_content", {}),
+        confidence_score=body.get("confidence_score", 0.5),
+        evidence_count=body.get("evidence_count", 1),
+    )
+    _db.upsert_memory(memory)
+    return {"status": "ok"}
+
+
+# ── Skill-Driven: Pending Facts 端点 ──
+
+
+@app.get("/pending-facts/{account_id}")
+async def get_pending_facts(account_id: str, status: str = "pending", category: str = None):
+    """Skill 获取当前的 pending facts。"""
+    _check_ready()
+    facts = _db.get_pending_facts(account_id, status=status, category=category)
+    return {"facts": facts}
+
+
+@app.post("/pending-facts/{account_id}")
+async def write_pending_facts(account_id: str, body: dict):
+    """Analyzer skill 写入新的 pending fact。"""
+    _check_ready()
+    facts = body.get("facts", [])
+    created = 0
+    updated = 0
+    for f in facts:
+        is_new = _db.upsert_pending_fact(
+            account_id=account_id,
+            fact_key=f["fact_key"],
+            fact_category=f["fact_category"],
+            fact_content=f["fact_content"],
+            confidence=f.get("confidence", 0.5),
+            source_email_id=f.get("source_email_id", ""),
+        )
+        if is_new:
+            created += 1
+        else:
+            updated += 1
+    return {"status": "ok", "created": created, "updated": updated}
+
+
+@app.post("/pending-facts/{account_id}/promote")
+async def promote_pending_facts(account_id: str):
+    """触发提升检查。将达标的 pending facts 提升到 USER.md。"""
+    _check_ready()
+    promoted = _db.promote_pending_facts(account_id)
+    if promoted:
+        _append_facts_to_user_md(promoted)
+    return {"promoted_count": len(promoted), "promoted": promoted}
+
+
+def _append_facts_to_user_md(facts: list) -> None:
+    """将 promoted facts 追加写入 USER.md（按 fact_category 分组）。"""
+    from pathlib import Path
+    user_md_path = Path.home() / ".openclaw" / "workspace" / "USER.md"
+    user_md_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 读取现有内容
+    existing = ""
+    if user_md_path.exists():
+        existing = user_md_path.read_text(encoding="utf-8")
+
+    # 按 category 分组
+    by_category: dict = {}
+    for f in facts:
+        cat = f["fact_category"]
+        by_category.setdefault(cat, []).append(f)
+
+    # category → section 标题映射
+    section_titles = {
+        "career": "## 职业信息",
+        "contact": "## 联系人",
+        "organization": "## 组织结构",
+        "project": "## 项目信息",
+        "writing_habit": "## 写作习惯",
+        "communication_style": "## 沟通风格",
+    }
+
+    lines_to_append = []
+    for cat, cat_facts in by_category.items():
+        title = section_titles.get(cat, f"## {cat}")
+        # 检查 section 是否已存在
+        if title not in existing:
+            lines_to_append.append(f"\n{title}\n")
+        for f in cat_facts:
+            entry = f"- {f['fact_content']}"
+            # 避免重复写入
+            if entry not in existing:
+                lines_to_append.append(entry)
+
+    if lines_to_append:
+        with open(user_md_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines_to_append) + "\n")
 
 
 # ── 启动函数（供 main.py 调用）──

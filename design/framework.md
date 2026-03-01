@@ -74,20 +74,19 @@ ClawMail 核心架构
 │  └──────────────┘  └──────────────┘  └──────────────────────┘   │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │              Plugin Chain                                  │ │
+│  │         Skill-Driven AI Pipeline (新架构)                   │ │
 │  │                                                            │ │
-│  │   ┌────────┐    ┌──────────────────────────────────────┐  │ │
-│  │   │PreCheck│───►│     UnifiedAnalyze (Prompt #1)        │  │ │
-│  │   │(需处理?)│    │  单次AI调用：摘要+分类+关键词+任务提取  │  │ │
-│  │   └────────┘    └──────────────────┬───────────────────┘  │ │
-│  │        │                           │                       │ │
-│  │        └──── 跳过(skipped) ────────►│                       │ │
-│  │                                    ▼                       │ │
-│  │                           ┌────────────────┐               │ │
-│  │                           │    PostProc    │               │ │
-│  │                           │ JSON解析+写库   │               │ │
-│  │                           └────────────────┘               │ │
-│  │  按需触发（独立）：Prompt#3重分类 / Prompt#4任务提取          │ │
+│  │   ┌──────────────┐    ┌────────────────────────────────┐  │ │
+│  │   │ ai_processor │───►│ subprocess → skill 脚本         │  │ │
+│  │   │  (dispatcher)│    │ (analyze_email.py 等)           │  │ │
+│  │   └──────────────┘    └────────────┬───────────────────┘  │ │
+│  │        │ fallback                  │ skill 通过 REST API  │ │
+│  │        ▼                           │ 读写 DB 数据         │ │
+│  │   ┌──────────────┐                 ▼                      │ │
+│  │   │ Legacy Path  │        ┌────────────────┐              │ │
+│  │   │ (旧 prompt   │        │ pending_facts  │              │ │
+│  │   │  LLM 调用)   │        │ 事实累积→提升   │              │ │
+│  │   └──────────────┘        └────────────────┘              │ │
 │  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -101,42 +100,36 @@ ClawMail 核心架构
 └─────────────────────────────────────────────────────────────────┘
 
 
-核心数据流：新邮件处理
-┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────────────┐
-│ IMAP拉取 │────►│ 原始存储 │────►│ 状态标记 │────►│  PluginPipeline │
-│ 新邮件   │     │ (Raw)   │     │pending  │     │   串行处理       │
-└─────────┘     └─────────┘     └─────────┘     └────────┬────────┘
-                                                         │
-                              ┌─────────────────────────┼─────────┐
-                              │                         │         │
-                              ▼                         ▼         ▼
-                         ┌─────────┐              ┌─────────┐ ┌─────────┐
-                         │无需处理? │────────Yes───►│ 标记skip │ │ 直接展示 │
-                         │(广告/通知)│              │ 不调用AI │ │ 在列表   │
-                         └────┬────┘              └─────────┘ └─────────┘
-                              │ No
+核心数据流：新邮件处理（Skill-Driven 架构）
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌──────────────────────┐
+│ IMAP拉取 │────►│ 原始存储 │────►│ 状态标记 │────►│  ai_processor.py     │
+│ 新邮件   │     │ (Raw)   │     │pending  │     │  (Skill dispatcher)  │
+└─────────┘     └─────────┘     └─────────┘     └────────┬─────────────┘
+                                                          │
+                                           ┌──────────────┴──────────────┐
+                                           ▼                             ▼
+                                   ┌───────────────┐           ┌─────────────────┐
+                                   │  Skill Path   │           │  Fallback Path  │
+                                   │  (subprocess) │           │  (旧 prompt LLM) │
+                                   └───────┬───────┘           └─────────────────┘
+                                           │
+                              ┌────────────┼────────────┐
+                              ▼            ▼            ▼
+                       ┌──────────┐ ┌──────────┐ ┌──────────────┐
+                       │ 邮件分析  │ │ 事实提取  │ │ pending facts│
+                       │摘要+分类  │ │联系人/项目│ │ 累积→提升     │
+                       │+评分+任务 │ │+职业信息  │ │ →USER.md     │
+                       └──────────┘ └──────────┘ └──────────────┘
+                              │
                               ▼
-                    ┌─────────────────┐
-                    │ 调用OpenClaw对话  │
-                    │ 单轮/多轮获取结果 │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────┐
-        │ 生成摘要  │  │ 提取分类  │  │ 识别任务  │
-        │ (1句话)  │  │ (标签+优先级)│ │ (待办事项) │
-        └──────────┘  └──────────┘  └──────────┘
+                    ┌─────────────────────┐
+                    │ Skill → REST API    │
+                    │ 写入 EmailAIMetadata│
+                    │ ai_status=processed │
+                    └────────┬────────────┘
                              │
                              ▼
-                    ┌─────────────────┐
-                    │  合并AI结果      │
-                    │  更新邮件状态    │
-                    │  status=ready   │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
+                    ┌─────────────────────┐
                     │  通知UI更新          │
                     │ (Qt Signals → 主线程) │
                     └─────────────────────┘
@@ -145,6 +138,18 @@ ClawMail 核心架构
 ### 个性化反馈闭环（OpenClaw skill 触发）
 
 用户修改邮件重要性评分后，ClawMail 记录到 `~/clawmail_data/feedback/feedback_importance_score.jsonl`。当记录数达到 5 条时，自动向 OpenClaw 发送消息触发 `clawmail-personalization` skill，该 skill 读取反馈 + 当前 prompt + 用户侧写，由大模型生成个性化评分标准，更新 `prompts/importance_score.txt` 并归档旧数据。详见 `PersonalizationPlan.md`。
+
+### Skill-Driven 架构（新）
+
+ClawMail 已迁移至 Skill-Driven 架构。AI 逻辑不再由 ClawMail 内部拼 prompt 调 LLM，而是通过 `subprocess` 直接调用外部 OpenClaw skill 脚本：
+
+- **clawmail-analyzer**: 邮件分析（摘要、分类、评分、垃圾邮件检测、行动项、事实提取）
+- **clawmail-reply**: 回复生成、新邮件生成、润色
+- **clawmail-executor**: 用户偏好提取（用户修正 AI 预测后触发）
+
+ClawMail 变为纯数据层 + UI 层，通过 REST API（`127.0.0.1:9999`）向 skill 脚本暴露邮件数据、记忆和 pending facts。Skill 脚本不存在时自动 fallback 到旧的 prompt-based 路径。
+
+**Pending Facts 机制**：skill 从邮件中提取事实性信息（联系人关系、项目上下文、职业信息等）写入 `pending_facts` 表，同一事实被多封邮件佐证后置信度累加，达标后自动提升到 `~/.openclaw/workspace/USER.md`。
 
 
 
@@ -294,13 +299,17 @@ infrastructure/
 │       └── v1_initial.py
 ├── ai/                           # AI服务实现
 │   ├── __init__.py
-│   ├── openai_bridge.py          # OpenClaw桥接
+│   ├── ai_processor.py           # Skill-Driven: subprocess → skill scripts (fallback: legacy prompt)
+│   │                             # process_email(): 优先调 analyzer skill，失败 fallback 旧路径
+│   │                             # generate_reply_draft()/generate_email()/polish_email(): 同上模式
+│   │                             # 详细 skill 路径配置见 tech_spec.md 1.5b 节
+│   ├── openai_bridge.py          # OpenClaw桥接（legacy fallback + 用户聊天）
 │   │                             # 遵循根目录 ClawChat.py 的通信模式（不导入，独立实现）
 │   │                             # process_email(): 对应 mailChat，agentId="mailAgent_{id[:8]}"
 │   │                             # user_chat(): 对应 userChat，agentId="userAgent001"
 │   │                             # 同步调用，Plugin层用 run_in_executor 包装为 async
 │   │                             # 详细实现模式见 tech_spec.md 第1.5节
-│   └── prompts/                  # 提示词模板
+│   └── prompts/                  # 提示词模板（legacy, Phase 3 后清理）
 │       ├── __init__.py
 │       ├── templates/            # 按功能分类（对应 prompt.md 中各 Prompt）
 │       │   ├── unified_analyze.txt  # Prompt #1：统一分析（摘要+分类+任务提取）

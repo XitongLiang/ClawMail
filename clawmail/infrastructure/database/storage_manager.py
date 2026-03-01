@@ -240,6 +240,23 @@ CREATE TABLE IF NOT EXISTS skill_bank (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 12. Pending facts (Skill-Driven 事实累积)
+CREATE TABLE IF NOT EXISTS pending_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_account_id TEXT NOT NULL,
+    fact_key TEXT NOT NULL,
+    fact_category TEXT NOT NULL,
+    fact_content TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    evidence_count INTEGER NOT NULL DEFAULT 1,
+    source_emails TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    promoted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
 """
 
 _INDEXES = """
@@ -260,6 +277,9 @@ CREATE INDEX IF NOT EXISTS idx_attachments_email ON attachments(email_id);
 
 CREATE INDEX IF NOT EXISTS idx_memory_user_type ON user_preference_memory(user_account_id, memory_type);
 CREATE INDEX IF NOT EXISTS idx_memory_key ON user_preference_memory(user_account_id, memory_key);
+
+CREATE INDEX IF NOT EXISTS idx_pending_facts_account ON pending_facts(user_account_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_facts_key ON pending_facts(user_account_id, fact_key);
 """
 
 _FTS5 = """
@@ -344,31 +364,6 @@ class ClawDB:
         # 创建 chat_logs 目录（AI 对话记录）
         (self.data_dir / "chat_logs").mkdir(exist_ok=True)
 
-        # 创建 prompts 目录，写入默认说明文件（不覆盖已有）
-        _prompts_dir = self.data_dir / "prompts"
-        _prompts_dir.mkdir(exist_ok=True)
-        (_prompts_dir / "archive").mkdir(exist_ok=True)
-        from clawmail.infrastructure.ai.ai_processor import (
-            DEFAULT_PROMPT_SECTIONS,
-            _PROMPT_TEMPLATE, _DRAFT_PROMPT_TEMPLATE,
-            _GENERATE_PROMPT_TEMPLATE, _POLISH_PROMPT_TEMPLATE,
-        )
-        # prompt sections（summary, category 等）
-        for _name, _content in DEFAULT_PROMPT_SECTIONS.items():
-            _f = _prompts_dir / f"{_name}.txt"
-            if not _f.exists():
-                _f.write_text(_content, encoding="utf-8")
-        # 4 个模板 prompt
-        for _name, _tpl in [
-            ("mail_analysis", _PROMPT_TEMPLATE),
-            ("reply_draft", _DRAFT_PROMPT_TEMPLATE),
-            ("generate_email", _GENERATE_PROMPT_TEMPLATE),
-            ("polish_email", _POLISH_PROMPT_TEMPLATE),
-        ]:
-            _f = _prompts_dir / f"{_name}.txt"
-            if not _f.exists():
-                _f.write_text(_tpl.strip(), encoding="utf-8")
-
         with self.get_conn() as conn:
             # PRAGMA 语句需逐条执行
             for stmt in _PRAGMAS.strip().split("\n"):
@@ -406,6 +401,30 @@ class ClawDB:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN importance_score INTEGER")
             if "summary" not in ai_cols:
                 conn.execute("ALTER TABLE email_ai_metadata ADD COLUMN summary TEXT")
+            # 兼容旧数据库：按需创建 pending_facts 表
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "pending_facts" not in tables:
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS pending_facts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_account_id TEXT NOT NULL,
+                        fact_key TEXT NOT NULL,
+                        fact_category TEXT NOT NULL,
+                        fact_content TEXT NOT NULL,
+                        confidence REAL NOT NULL DEFAULT 0.0,
+                        evidence_count INTEGER NOT NULL DEFAULT 1,
+                        source_emails TEXT NOT NULL DEFAULT '[]',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        promoted_at TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (user_account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_pending_facts_account ON pending_facts(user_account_id, status);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_facts_key ON pending_facts(user_account_id, fact_key);
+                """)
             conn.commit()
 
     @contextmanager
@@ -1534,3 +1553,287 @@ class ClawDB:
                     d[dt_field] = None
         return Skill(**{k: v for k, v in d.items()
                         if k in Skill.__dataclass_fields__})
+
+    # --------------------------------------------------------
+    # Skill-Driven: pending_facts
+    # --------------------------------------------------------
+
+    # 各 fact_category 的提升阈值
+    _PROMOTION_THRESHOLDS = {
+        "career": 0.75,
+        "contact": 0.60,
+        "organization": 0.70,
+        "project": 0.55,
+        "writing_habit": 0.65,
+        "communication_style": 0.65,
+    }
+
+    def upsert_pending_fact(
+        self, account_id: str, fact_key: str, fact_category: str,
+        fact_content: str, confidence: float, source_email_id: str,
+    ) -> bool:
+        """插入或更新 pending fact，累加置信度。返回 True=新建, False=更新。"""
+        with self.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_facts WHERE user_account_id = ? AND fact_key = ?",
+                (account_id, fact_key),
+            ).fetchone()
+
+            now = datetime.utcnow().isoformat()
+            if row and row["status"] == "pending":
+                # 已存在 pending fact：累加置信度
+                existing_confidence = row["confidence"]
+                new_confidence = min(1.0, existing_confidence + confidence * 0.3)
+                new_evidence = row["evidence_count"] + 1
+                try:
+                    sources = json.loads(row["source_emails"])
+                except (json.JSONDecodeError, TypeError):
+                    sources = []
+                sources.append({
+                    "email_id": source_email_id,
+                    "extracted_at": now,
+                    "individual_confidence": confidence,
+                })
+                conn.execute(
+                    """UPDATE pending_facts
+                       SET fact_content = ?, confidence = ?, evidence_count = ?,
+                           source_emails = ?, updated_at = ?
+                       WHERE user_account_id = ? AND fact_key = ?""",
+                    (
+                        fact_content, new_confidence, new_evidence,
+                        json.dumps(sources, ensure_ascii=False), now,
+                        account_id, fact_key,
+                    ),
+                )
+                conn.commit()
+                return False
+            else:
+                # 新 fact（或已 promoted/dismissed 的重新出现）
+                sources = json.dumps([{
+                    "email_id": source_email_id,
+                    "extracted_at": now,
+                    "individual_confidence": confidence,
+                }], ensure_ascii=False)
+                if row:
+                    # 已存在但 promoted/dismissed → 重置为 pending
+                    conn.execute(
+                        """UPDATE pending_facts
+                           SET fact_category = ?, fact_content = ?, confidence = ?,
+                               evidence_count = 1, source_emails = ?, status = 'pending',
+                               promoted_at = NULL, updated_at = ?
+                           WHERE user_account_id = ? AND fact_key = ?""",
+                        (fact_category, fact_content, confidence, sources, now,
+                         account_id, fact_key),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO pending_facts
+                           (user_account_id, fact_key, fact_category, fact_content,
+                            confidence, evidence_count, source_emails, status,
+                            created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, 1, ?, 'pending', ?, ?)""",
+                        (account_id, fact_key, fact_category, fact_content,
+                         confidence, sources, now, now),
+                    )
+                conn.commit()
+                return True
+
+    def get_pending_facts(
+        self, account_id: str, status: str = "pending", category: str = None,
+    ) -> List[dict]:
+        """获取指定状态的 pending facts。"""
+        with self.get_conn() as conn:
+            if category:
+                rows = conn.execute(
+                    """SELECT * FROM pending_facts
+                       WHERE user_account_id = ? AND status = ? AND fact_category = ?
+                       ORDER BY confidence DESC""",
+                    (account_id, status, category),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM pending_facts
+                       WHERE user_account_id = ? AND status = ?
+                       ORDER BY confidence DESC""",
+                    (account_id, status),
+                ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["source_emails"] = json.loads(d["source_emails"])
+            except (json.JSONDecodeError, TypeError):
+                d["source_emails"] = []
+            result.append(d)
+        return result
+
+    def get_pending_fact(self, account_id: str, fact_key: str) -> Optional[dict]:
+        """获取单个 pending fact。"""
+        with self.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_facts WHERE user_account_id = ? AND fact_key = ?",
+                (account_id, fact_key),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["source_emails"] = json.loads(d["source_emails"])
+        except (json.JSONDecodeError, TypeError):
+            d["source_emails"] = []
+        return d
+
+    def promote_pending_facts(self, account_id: str) -> List[dict]:
+        """检查所有 pending facts，将达标的标记为 promoted 并返回。"""
+        pending = self.get_pending_facts(account_id, status="pending")
+        promoted = []
+        now = datetime.utcnow().isoformat()
+        with self.get_conn() as conn:
+            for fact in pending:
+                threshold = self._PROMOTION_THRESHOLDS.get(
+                    fact["fact_category"], 0.70
+                )
+                if fact["confidence"] >= threshold:
+                    conn.execute(
+                        """UPDATE pending_facts
+                           SET status = 'promoted', promoted_at = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (now, now, fact["id"]),
+                    )
+                    fact["status"] = "promoted"
+                    fact["promoted_at"] = now
+                    promoted.append(fact)
+            if promoted:
+                conn.commit()
+        return promoted
+
+    def dismiss_pending_fact(self, account_id: str, fact_key: str) -> None:
+        """手动驳回一个 pending fact。"""
+        now = datetime.utcnow().isoformat()
+        with self.get_conn() as conn:
+            conn.execute(
+                """UPDATE pending_facts
+                   SET status = 'dismissed', updated_at = ?
+                   WHERE user_account_id = ? AND fact_key = ?""",
+                (now, account_id, fact_key),
+            )
+            conn.commit()
+
+    # --------------------------------------------------------
+    # Skill-Driven: 邮件数据查询（供 Skill REST API）
+    # --------------------------------------------------------
+
+    def get_email_full(self, email_id: str) -> Optional[dict]:
+        """获取邮件完整数据（dict 格式，body_text 截断到 4000 字符），供 REST API 返回给 Skill。"""
+        email = self.get_email(email_id)
+        if not email:
+            return None
+
+        from_info = email.from_address or {}
+        body_text = email.body_text or ""
+        if len(body_text) > 4000:
+            body_text = body_text[:4000]
+
+        # 查询附件信息
+        attachments = []
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT filename, size_bytes FROM attachments WHERE email_id = ?",
+                (email_id,),
+            ).fetchall()
+            for r in rows:
+                attachments.append({"filename": r["filename"], "size": r["size_bytes"]})
+
+        return {
+            "id": email.id,
+            "subject": email.subject,
+            "from_address": from_info,
+            "to_addresses": email.to_addresses or [],
+            "cc_addresses": email.cc_addresses or [],
+            "received_at": email.received_at.isoformat() if email.received_at else None,
+            "body_text": body_text,
+            "body_html": email.body_html or "",
+            "folder": email.folder,
+            "attachments": attachments,
+            "read_status": email.read_status,
+            "reply_status": email.reply_status,
+            "thread_id": email.thread_id,
+            "in_reply_to": email.in_reply_to,
+        }
+
+    def get_thread_emails(self, thread_id: str, limit: int = 20) -> List[dict]:
+        """获取同一线程的邮件列表（含 AI 摘要 one_line），按时间升序。
+
+        供 analyzer skill 做线程上下文注入。
+        """
+        if not thread_id:
+            return []
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT e.id, e.subject, e.from_address, e.received_at,
+                          m.summary
+                   FROM emails e
+                   LEFT JOIN email_ai_metadata m ON e.id = m.email_id
+                   WHERE e.thread_id = ?
+                   ORDER BY e.received_at ASC
+                   LIMIT ?""",
+                (thread_id, limit),
+            ).fetchall()
+        result = []
+        for r in rows:
+            from_addr = {}
+            if r["from_address"]:
+                try:
+                    from_addr = json.loads(r["from_address"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            one_line = None
+            if r["summary"]:
+                try:
+                    s = json.loads(r["summary"])
+                    one_line = s.get("one_line", "")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            result.append({
+                "id": r["id"],
+                "subject": r["subject"],
+                "from_address": from_addr,
+                "received_at": r["received_at"],
+                "ai_summary_one_line": one_line,
+            })
+        return result
+
+    def get_unprocessed_emails(
+        self, account_id: str, limit: int = 20,
+    ) -> List[dict]:
+        """获取 ai_status='unprocessed' 的邮件列表（简要信息）。"""
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT e.id, e.subject, e.from_address, e.received_at
+                   FROM emails e
+                   LEFT JOIN email_ai_metadata m ON e.id = m.email_id
+                   WHERE e.account_id = ?
+                     AND e.folder NOT IN ('草稿箱', '已删除', '已发送')
+                     AND (m.email_id IS NULL
+                          OR m.ai_status IN ('unprocessed', 'failed'))
+                   ORDER BY e.received_at DESC
+                   LIMIT ?""",
+                (account_id, limit),
+            ).fetchall()
+        result = []
+        for r in rows:
+            from_addr = r["from_address"]
+            if from_addr:
+                try:
+                    from_addr = json.loads(from_addr)
+                except (json.JSONDecodeError, TypeError):
+                    from_addr = {}
+            else:
+                from_addr = {}
+            result.append({
+                "id": r["id"],
+                "subject": r["subject"],
+                "from_address": from_addr,
+                "received_at": r["received_at"],
+            })
+        return result
