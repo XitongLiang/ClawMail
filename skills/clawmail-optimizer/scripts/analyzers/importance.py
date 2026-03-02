@@ -1,11 +1,11 @@
 """分析重要性评分修正反馈，提取评分偏好模式。
 
-importance_score 类型没有 JSONL 文件，反馈通过 executor 已写入 MemoryBank。
+importance_score 类型没有 JSONL 文件，反馈通过 learner 已写入 MemoryBank。
 此 analyzer 从 MemoryBank 读取 sender_importance.* / urgency_signal.* 记忆，
 综合分析用户的评分修正趋势。
 
 注意：records 参数来自 GET /personalization/feedback/importance_score，
-      可能为空（因为反馈走 executor 而非 JSONL）。
+      可能为空（因为反馈走 learner 而非 JSONL）。
       但 optimizer 调用时也会传入 memories，此 analyzer 需要在 analyze_feedback
       签名中兼容（目前只用 records）。
 """
@@ -16,7 +16,7 @@ def analyze_feedback(records: list[dict]) -> list[str]:
 
     records 可能来自两个来源:
     1. JSONL feedback_importance_score.jsonl（如果未来添加）
-    2. 传入的 MemoryBank entries（executor 已处理的评分修正记忆）
+    2. 传入的 MemoryBank entries（learner 已处理的评分修正记忆）
 
     当前实现：从 records 中分析评分修正模式。
     每条 record 预期结构:

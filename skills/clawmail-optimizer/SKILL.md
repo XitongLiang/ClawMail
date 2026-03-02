@@ -1,26 +1,30 @@
 # clawmail-optimizer
 
-元 Skill：根据用户反馈数据自动优化其他 Skill 的行为规则。
+元 Skill：根据用户反馈数据自动优化其他 Skill 的行为规则 + 清洗用户记忆。
 
 ## 功能
 
-读取用户隐式反馈（编辑 AI 草稿、修正评分、摘要差评），分析修改模式，用 LLM 重写目标 Skill 的 `references/prompts/*.md` 文件，使 AI 输出更贴近用户偏好。
+1. **Prompt 优化**：读取用户反馈，分析修改模式，用 LLM 重写目标 Skill 的 prompt 文件
+2. **记忆清洗**：当记忆累积达阈值（10 条新增），自动合并重复、解决矛盾、分类 skill_defect
 
 ## 脚本
 
 | 脚本 | 用途 |
 |---|---|
-| `optimize.py` | 主入口，分析反馈 → LLM 重写 prompt → 写回文件 |
+| `optimize.py` | 主入口，支持 optimize / clean 两种模式 |
 | `rollback.py` | 回滚 prompt 到之前的备份版本 |
 
 ## 调用方式
 
 ```bash
-# 自动触发（反馈计数达阈值时由 ClawMail 后台调用）
-python optimize.py --prompt-type email_generation --account-id <id>
+# Prompt 优化（反馈计数达阈值时由 ClawMail 后台调用）
+python optimize.py --mode optimize --prompt-type email_generation --account-id <id>
 
-# 手动预览（不实际修改）
-python optimize.py --prompt-type email_generation --account-id <id> --dry-run
+# 记忆清洗（learner 累计写入 10 条后自动触发）
+python optimize.py --mode clean --account-id <id>
+
+# 预览模式（不实际修改）
+python optimize.py --mode clean --account-id <id> --dry-run
 
 # 回滚
 python rollback.py --prompt-type email_generation --target reply_guide.md --version latest
@@ -35,6 +39,18 @@ python rollback.py --prompt-type email_generation --target reply_guide.md --vers
 | `importance_score` | 重要性评分修正 | importance_algorithm.md |
 | `summary` | 摘要评价 | summary_guide.md |
 
+## 记忆清洗规则
+
+- **合并重复**：同 type + 同/相似 key → 合并为一条，evidence_count 累加
+- **解决矛盾**：同 key 但 content 冲突 → 保留高证据/更新鲜的
+- **标注缺陷**：`_source=skill_defect` 的记忆 → 提取缺陷描述 → 触发对应 prompt 优化
+
+## 触发机制
+
+- learner 每次写入记忆后累加计数
+- 累计 ≥ 10 条新写入 → 后台自动触发 `--mode clean`
+- 清洗发现 skill_defect → 自动触发对应 `--mode optimize`
+
 ## 安全机制
 
 - 每次修改前自动备份到 `.backups/` 目录
@@ -44,5 +60,5 @@ python rollback.py --prompt-type email_generation --target reply_guide.md --vers
 
 ## 依赖
 
-- ClawMail REST API (`GET /personalization/feedback/`, `POST /personalization/archive-feedback`)
+- ClawMail REST API (`GET /memories/`, `POST /memories/`, `GET /personalization/feedback/`)
 - OpenClaw LLM Gateway

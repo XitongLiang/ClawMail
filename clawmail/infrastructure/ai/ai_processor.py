@@ -20,7 +20,7 @@ REPLY_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "generate_reply.py"
 GENERATE_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "generate_email.py"
 POLISH_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "polish_email.py"
 HABITS_SCRIPT = SKILL_BASE / "clawmail-reply" / "scripts" / "extract_habits.py"
-EXECUTOR_SCRIPT = SKILL_BASE / "clawmail-executor" / "scripts" / "extract_preference.py"
+LEARNER_SCRIPT = SKILL_BASE / "clawmail-learner" / "scripts" / "extract_preference.py"
 OPTIMIZER_SCRIPT = SKILL_BASE / "clawmail-optimizer" / "scripts" / "optimize.py"
 
 
@@ -95,11 +95,12 @@ class AIProcessor:
             cmd.append("--is-sent")
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, stdout=subprocess.PIPE, stderr=None,
+            encoding="utf-8", timeout=120,
         )
 
         if result.returncode != 0:
-            raise AIProcessingError(f"Analyzer skill 失败: {result.stderr}")
+            raise AIProcessingError(f"Analyzer skill 失败 (exit={result.returncode})")
 
         # Skill 脚本执行时已通过 REST API 写入 DB
         # 尝试从 DB 读取最新结果
@@ -118,18 +119,18 @@ class AIProcessor:
         raise AIProcessingError("Skill 脚本未返回结果且 DB 中无数据")
 
     def generate_reply_draft(
-        self, email: Email, stance: str, tone: str,
+        self, email: Email, stance: str,
         user_notes: str = "", account_id: str = None,
     ) -> str:
         """
-        根据选定立场和风格生成回复草稿，返回正文字符串。
+        根据选定立场生成回复草稿，返回正文字符串。
+        语气风格由 LLM 根据用户记忆自动判断。
         调用 reply skill 脚本，失败时抛出 AIProcessingError。
         """
         cmd = [
             sys.executable, str(REPLY_SCRIPT),
             "--email-id", str(email.id),
             "--stance", stance,
-            "--tone", tone,
         ] + self._token_args()
         if account_id:
             cmd.extend(["--account-id", account_id])
@@ -137,49 +138,57 @@ class AIProcessor:
             cmd.extend(["--user-notes", user_notes])
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, stdout=subprocess.PIPE, stderr=None,
+            encoding="utf-8", timeout=120,
         )
         if result.returncode != 0:
-            raise AIProcessingError(f"Reply skill 失败: {result.stderr}")
+            detail = result.stdout.strip()[:200] if result.stdout else ""
+            raise AIProcessingError(
+                f"Reply skill 失败 (rc={result.returncode}): {detail}"
+            )
         if not result.stdout.strip():
             raise AIProcessingError("Reply skill 未返回结果")
         return result.stdout.strip()
 
-    def generate_email(self, subject: str, outline: str, tone: str) -> str:
+    def generate_email(self, subject: str, outline: str) -> str:
         """
         根据主题和大纲生成完整邮件正文，返回正文字符串。
+        语气风格由 LLM 根据用户记忆自动判断。
         调用 generate skill 脚本，失败时抛出 AIProcessingError。
         """
         cmd = [
             sys.executable, str(GENERATE_SCRIPT),
             "--subject", subject or "",
             "--outline", outline,
-            "--tone", tone,
         ] + self._token_args()
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, stdout=subprocess.PIPE, stderr=None,
+            encoding="utf-8", timeout=120,
         )
         if result.returncode != 0:
-            raise AIProcessingError(f"Generate skill 失败: {result.stderr}")
+            detail = result.stdout.strip()[:200] if result.stdout else ""
+            raise AIProcessingError(f"Generate skill 失败 (rc={result.returncode}): {detail}")
         if not result.stdout.strip():
             raise AIProcessingError("Generate skill 未返回结果")
         return result.stdout.strip()
 
-    def polish_email(self, body: str, tone: str) -> str:
+    def polish_email(self, body: str) -> str:
         """
         对邮件正文进行 AI 润色，返回润色后的正文字符串。
+        语气风格由 LLM 根据用户记忆自动判断。
         调用 polish skill 脚本，失败时抛出 AIProcessingError。
         """
         cmd = [
             sys.executable, str(POLISH_SCRIPT),
-            "--tone", tone,
             "--body", body[:BODY_MAX_CHARS],
         ] + self._token_args()
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, stdout=subprocess.PIPE, stderr=None,
+            encoding="utf-8", timeout=120,
         )
         if result.returncode != 0:
-            raise AIProcessingError(f"Polish skill 失败: {result.stderr}")
+            detail = result.stdout.strip()[:200] if result.stdout else ""
+            raise AIProcessingError(f"Polish skill 失败 (rc={result.returncode}): {detail}")
         if not result.stdout.strip():
             raise AIProcessingError("Polish skill 未返回结果")
         return result.stdout.strip()

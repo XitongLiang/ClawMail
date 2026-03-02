@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     source_email_id TEXT,
     source_task_index INTEGER,
     source_type TEXT DEFAULT 'manual'
-        CHECK(source_type IN ('extracted', 'manual', 'template', 'recurring')),
+        CHECK(source_type IN ('extracted', 'manual', 'template', 'recurring', 'proactive')),
     title TEXT NOT NULL,
     description TEXT,
     status TEXT DEFAULT 'pending'
@@ -425,6 +425,53 @@ class ClawDB:
                     CREATE INDEX IF NOT EXISTS idx_pending_facts_account ON pending_facts(user_account_id, status);
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_facts_key ON pending_facts(user_account_id, fact_key);
                 """)
+            # 兼容旧数据库：tasks.source_type CHECK 约束需要包含 'proactive'
+            # SQLite 不支持 ALTER CHECK，需要重建表
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+                ).fetchone()
+                if row and row[0] and "'proactive'" not in row[0]:
+                    conn.executescript("""
+                        ALTER TABLE tasks RENAME TO _tasks_old;
+                        CREATE TABLE tasks (
+                            id TEXT PRIMARY KEY,
+                            source_email_id TEXT,
+                            source_task_index INTEGER,
+                            source_type TEXT DEFAULT 'manual'
+                                CHECK(source_type IN ('extracted', 'manual', 'template', 'recurring', 'proactive')),
+                            title TEXT NOT NULL,
+                            description TEXT,
+                            status TEXT DEFAULT 'pending'
+                                CHECK(status IN ('pending', 'in_progress', 'snoozed', 'completed', 'cancelled', 'rejected', 'archived')),
+                            priority TEXT DEFAULT 'medium'
+                                CHECK(priority IN ('high', 'medium', 'low', 'none')),
+                            is_flagged INTEGER DEFAULT 0,
+                            due_date TIMESTAMP,
+                            due_date_source TEXT
+                                CHECK(due_date_source IN ('ai_extracted', 'user_set', 'inferred') OR due_date_source IS NULL),
+                            snoozed_until TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            category TEXT,
+                            tags TEXT,
+                            metadata TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (source_email_id) REFERENCES emails(id) ON DELETE SET NULL
+                        );
+                        INSERT INTO tasks SELECT * FROM _tasks_old;
+                        DROP TABLE _tasks_old;
+                    """)
+                    print("[ClawDB] tasks 表已迁移: 新增 proactive source_type")
+            except Exception as e:
+                print(f"[ClawDB] tasks 表迁移跳过: {e}")
+
+            # 已发送邮件不应为未读
+            conn.execute(
+                "UPDATE emails SET read_status = 'read' "
+                "WHERE folder IN ('已发送', 'Sent Items') AND read_status = 'unread'"
+            )
+
             conn.commit()
 
     @contextmanager
@@ -1096,6 +1143,17 @@ class ClawDB:
             )
             conn.commit()
 
+    def mark_all_inbox_unread(self, account_id: str) -> int:
+        """将当前账户收件箱所有已读邮件标为未读，返回影响行数。"""
+        with self.get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE emails SET read_status = 'unread', updated_at = ? "
+                "WHERE account_id = ? AND folder = 'INBOX' AND read_status != 'unread'",
+                (datetime.utcnow().isoformat(), account_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+
     def count_emails(self, account_id: Optional[str] = None) -> int:
         """返回本地邮件总数；传入 account_id 则只统计该账户。"""
         with self.get_conn() as conn:
@@ -1402,6 +1460,29 @@ class ClawDB:
             ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
+    def get_memories_by_type_and_key(
+        self, account_id: str, memory_type: str, memory_key: str | None,
+    ) -> List[UserMemory]:
+        """按 memory_type + memory_key 精确查询（key=None 时匹配 IS NULL）。"""
+        with self.get_conn() as conn:
+            if memory_key is None:
+                rows = conn.execute(
+                    """SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ? AND memory_type = ?
+                         AND memory_key IS NULL
+                       ORDER BY confidence_score DESC""",
+                    (account_id, memory_type),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM user_preference_memory
+                       WHERE user_account_id = ? AND memory_type = ?
+                         AND memory_key = ?
+                       ORDER BY confidence_score DESC""",
+                    (account_id, memory_type, memory_key),
+                ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
     def get_memories_for_sender(
         self, account_id: str, sender_email: str
     ) -> List[UserMemory]:
@@ -1419,9 +1500,11 @@ class ClawDB:
         self, account_id: str, sender_email: str, sender_domain: str,
         memory_types: list = None,
     ) -> List[UserMemory]:
-        """检索与当前邮件相关的偏好记忆（按发件人 + 域名 + 全局偏好）。
+        """检索与当前邮件相关的偏好记忆（按发件人 + 域名 + 全局偏好 + contact画像）。
         memory_types: 可选，限定返回的 memory_type 列表。为空时返回所有类型。
         """
+        # contact.* 画像的 key 格式为 contact.{email}.xxx，需要 LIKE 匹配
+        contact_prefix = f"contact.{sender_email.lower()}%" if sender_email else ""
         with self.get_conn() as conn:
             if memory_types:
                 placeholders = ",".join("?" for _ in memory_types)
@@ -1431,9 +1514,11 @@ class ClawDB:
                          AND memory_type IN ({placeholders})
                          AND (memory_key IS NULL
                               OR memory_key = ?
-                              OR memory_key = ?)
+                              OR memory_key = ?
+                              OR memory_key LIKE ?)
                        ORDER BY confidence_score DESC""",
-                    (account_id, *memory_types, sender_email, sender_domain),
+                    (account_id, *memory_types, sender_email, sender_domain,
+                     contact_prefix),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -1441,9 +1526,10 @@ class ClawDB:
                        WHERE user_account_id = ?
                          AND (memory_key IS NULL
                               OR memory_key = ?
-                              OR memory_key = ?)
+                              OR memory_key = ?
+                              OR memory_key LIKE ?)
                        ORDER BY confidence_score DESC""",
-                    (account_id, sender_email, sender_domain),
+                    (account_id, sender_email, sender_domain, contact_prefix),
                 ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 

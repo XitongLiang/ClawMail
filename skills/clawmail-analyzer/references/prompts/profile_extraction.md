@@ -92,4 +92,5 @@
 - 只提取关于**用户**（收件人）的信息；contact_direction 和 contact_comm_pattern 是关于用户与发件人之间关系的信息，属于合法的用户侧写范围
 - 如果无法提取任何有价值的信息，返回空数组 `[]`
 - 不要重复提取已在 USER.md 中存在的信息
-- 每封邮件最多提取 5 个 facts（优先提取置信度高的），其中 contact_direction / contact_comm_pattern 各算 1 个
+- 收件邮件：每封最多提取 5 个 facts（优先提取置信度高的），其中 contact_direction / contact_comm_pattern 各算 1 个
+- 已发送邮件：每封最多提取 3 个 facts（以收件人画像和用户自身信息为主）

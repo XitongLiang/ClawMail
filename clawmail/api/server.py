@@ -4,6 +4,7 @@ ClawMail 本地 HTTP REST API
 """
 import asyncio
 import json
+import subprocess
 import uuid
 from datetime import datetime
 from typing import Optional, List
@@ -61,6 +62,7 @@ class SendReplyRequest(BaseModel):
     reply_body: str                        # 回复正文（必填）
     reply_all: bool = False                # 是否回复所有人，默认 false
     subject_override: Optional[str] = None  # 可选，覆盖自动生成的主题
+    attachments: Optional[List[str]] = None  # 可选，附件文件路径列表
 
 
 class ConfirmDialogOption(BaseModel):
@@ -467,7 +469,7 @@ def _ser_email(e) -> dict:
         "date": e.received_at.isoformat() if e.received_at else None,
         "folder": e.folder,
         "read": e.read_status != "unread",
-        "is_flagged": bool(e.is_flagged),
+        "is_flagged": e.flag_status == "flagged",
         "body": e.body_text or "",
         "snippet": (e.body_text or "")[:200],
     }
@@ -704,6 +706,7 @@ async def send_reply(req: SendReplyRequest):
             body=plain_body,
             cc_addresses=cc_addresses or None,
             html_body=html_body,
+            attachments=req.attachments,
         )
     except SMTPSendError as e:
         raise HTTPException(status_code=502, detail=f"SMTP send failed: {e}")
@@ -787,7 +790,7 @@ def _trigger_compose_habit_extraction(
                 None,
                 lambda: _sp.run(
                     cmd,
-                    capture_output=True, text=True, timeout=120
+                    stdout=subprocess.PIPE, stderr=None, encoding="utf-8", timeout=120
                 )
             )
 
@@ -1149,22 +1152,111 @@ async def get_memories(account_id: str, memory_type: str = None, memory_key: str
     }
 
 
+@app.get("/memories/{account_id}/for-email")
+async def get_memories_for_email(
+    account_id: str,
+    sender_email: str = "",
+    sender_domain: str = "",
+):
+    """Skill 获取与当前邮件相关的偏好记忆（全局 + 发件人 + 域名）。"""
+    _check_ready()
+    if not sender_domain and sender_email and "@" in sender_email:
+        sender_domain = sender_email.split("@", 1)[1]
+    memories = _db.get_memories_for_email(account_id, sender_email, sender_domain)
+    return {
+        "memories": [
+            {
+                "id": m.id,
+                "memory_type": m.memory_type,
+                "memory_key": m.memory_key,
+                "memory_content": m.memory_content,
+                "confidence_score": m.confidence_score,
+                "evidence_count": m.evidence_count,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "last_updated": m.last_updated.isoformat() if m.last_updated else None,
+            }
+            for m in memories
+        ]
+    }
+
+
+_CONTENT_META_KEYS = {"_source", "extracted_date", "last_updated"}
+
+
+def _memory_content_match(existing_content, new_content) -> bool:
+    """判断两条记忆的 content 是否语义相同（去掉元字段后比较）。"""
+    if type(existing_content) != type(new_content):
+        return False
+    if isinstance(existing_content, str):
+        return existing_content.strip() == new_content.strip()
+    if isinstance(existing_content, dict):
+        # 去掉元字段后比较核心内容
+        def _core(d):
+            return {k: v for k, v in d.items() if k not in _CONTENT_META_KEYS}
+        return _core(existing_content) == _core(new_content)
+    return existing_content == new_content
+
+
 @app.post("/memories/{account_id}")
 async def write_memory(account_id: str, body: dict):
-    """Executor skill 写入偏好记忆。"""
+    """Learner skill 写入/更新/删除偏好记忆。"""
     _check_ready()
+    op = body.get("op", "insert").lower()
+
+    if op == "delete":
+        mid = body.get("memory_id")
+        if not mid:
+            return {"status": "error", "message": "missing memory_id"}
+        _db.delete_memory(mid)
+        return {"status": "ok", "op": "delete"}
+
+    if op == "update":
+        mid = body.get("memory_id")
+        if not mid:
+            return {"status": "error", "message": "missing memory_id"}
+        # 读取已有记忆，合并更新内容
+        existing = [m for m in _db.get_all_memories(account_id) if m.id == mid]
+        if not existing:
+            return {"status": "error", "message": "memory not found"}
+        mem = existing[0]
+        new_content = body.get("content", {})
+        if isinstance(mem.memory_content, dict) and isinstance(new_content, dict):
+            mem.memory_content.update(new_content)
+        else:
+            mem.memory_content = new_content
+        mem.confidence_score = body.get("confidence", mem.confidence_score)
+        mem.evidence_count += 1
+        _db.upsert_memory(mem)
+        return {"status": "ok", "op": "update"}
+
+    # insert（默认）— 先查重，再决定 insert 还是 auto_merge
+    mem_type = body["memory_type"]
+    mem_key = body.get("memory_key")
+    new_content = body.get("memory_content", {})
+    new_confidence = body.get("confidence_score", 0.5)
+
+    existing = _db.get_memories_by_type_and_key(account_id, mem_type, mem_key)
+    for mem in existing:
+        if _memory_content_match(mem.memory_content, new_content):
+            # 内容匹配 → 自动合并：bump evidence, 更新 confidence
+            mem.evidence_count += 1
+            mem.confidence_score = max(mem.confidence_score, new_confidence)
+            _db.upsert_memory(mem)
+            return {"status": "ok", "op": "auto_merged", "memory_id": mem.id}
+
+    # 无匹配 → 正常 INSERT
     from clawmail.domain.models.memory import UserMemory
     memory = UserMemory(
         id=str(uuid.uuid4()),
         user_account_id=account_id,
-        memory_type=body["memory_type"],
-        memory_key=body.get("memory_key"),
-        memory_content=body.get("memory_content", {}),
-        confidence_score=body.get("confidence_score", 0.5),
+        memory_type=mem_type,
+        memory_key=mem_key,
+        memory_content=new_content,
+        confidence_score=new_confidence,
         evidence_count=body.get("evidence_count", 1),
     )
     _db.upsert_memory(memory)
-    return {"status": "ok"}
+    return {"status": "ok", "op": "insert"}
 
 
 # ── Skill-Driven: Pending Facts 端点 ──

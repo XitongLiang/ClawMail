@@ -411,6 +411,7 @@ class ClawIMAPClient:
             hash=email_hash,
             sync_status="completed",
             is_downloaded=True,
+            read_status="read" if folder == "已发送" else "unread",
             folder=folder,
             thread_id=thread_id,
             in_reply_to=in_reply_to or None,

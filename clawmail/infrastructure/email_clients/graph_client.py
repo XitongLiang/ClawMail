@@ -283,6 +283,7 @@ class GraphSyncClient:
             hash=email_hash,
             sync_status="completed",
             is_downloaded=True,
+            read_status="read" if folder == "Sent Items" else "unread",
             folder=folder,
             thread_id=thread_id,
             in_reply_to=None,

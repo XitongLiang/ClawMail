@@ -1,6 +1,6 @@
 """
 UserMemory 域模型
-用户偏好记忆数据结构，由 clawmail-executor skill 写入，analyzer skill 读取注入 prompt。
+用户偏好记忆数据结构，由 clawmail-learner skill 写入，analyzer skill 读取注入 prompt。
 """
 
 from dataclasses import dataclass

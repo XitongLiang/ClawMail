@@ -1,6 +1,6 @@
 """分析摘要差评反馈，提取摘要偏好模式。
 
-summary 类型的反馈同样主要通过 executor 写入 MemoryBank（summary_preference.*），
+summary 类型的反馈同样主要通过 learner 写入 MemoryBank（summary_preference.*），
 但如果有 feedback_summary.jsonl 也可读取。
 
 records 来自 GET /personalization/feedback/summary，每条预期结构:

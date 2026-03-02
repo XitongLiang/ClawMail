@@ -1,9 +1,9 @@
 ---
-name: clawmail-executor
+name: clawmail-learner
 description: 用户偏好提取。分析用户对 AI 预测的修正行为，提取偏好记忆并写入 ClawMail MemoryBank。由 ClawMail 通过 subprocess 直接调用。
 ---
 
-# ClawMail Executor Skill
+# ClawMail Learner Skill
 
 分析用户对 AI 预测的修正，提取偏好记忆并写入 ClawMail MemoryBank。
 
@@ -55,7 +55,7 @@ stdout 输出执行状态 JSON（供 ClawMail 日志记录）。
 ## 目录结构
 
 ```
-clawmail-executor/
+clawmail-learner/
 ├── SKILL.md
 ├── references/
 │   ├── prompts/

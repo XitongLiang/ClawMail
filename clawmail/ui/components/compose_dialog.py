@@ -63,16 +63,14 @@ class ComposeDialog(QDialog):
         self._ai_metadata     = ai_metadata
         self._ai_processor    = ai_processor
         self._selected_stance = None
-        self._selected_tone   = None
 
         # 隐式反馈追踪：邮件生成（reply_draft + generate_email）
         self._ai_draft_text: str | None = None       # AI 生成的原始正文
         self._ai_draft_source: str | None = None     # "reply_draft" 或 "generate_email"
-        self._ai_draft_context: dict = {}             # stance, tone, outline 等上下文
+        self._ai_draft_context: dict = {}             # stance, outline 等上下文
         # 隐式反馈追踪：润色
         self._pre_polish_text: str | None = None      # 润色前的正文
         self._polished_text: str | None = None         # AI 润色后的正文
-        self._polish_tone: str | None = None           # 润色时选择的风格
 
         # 附件：文件绝对路径列表（可由 API 预填）
         self._attachments: list = list(initial_attachments or [])
@@ -305,27 +303,11 @@ class ComposeDialog(QDialog):
         vbox.setContentsMargins(10, 6, 10, 6)
         vbox.setSpacing(6)
 
-        # ── 行1：风格选择 + 润色正文 ─────────────────────────────
+        # ── 行1：AI 工具按钮 ─────────────────────────────
         row1 = QHBoxLayout()
         row1.setSpacing(6)
 
         row1.addWidget(QLabel("✨ AI 工具："))
-
-        self._polish_tone_group = QButtonGroup(self)
-        self._polish_tone_group.setExclusive(True)
-        self._polish_selected_tone = "礼貌"   # 默认风格
-        for t in ["正式", "礼貌", "轻松", "简短"]:
-            btn = QPushButton(t)
-            btn.setCheckable(True)
-            btn.setChecked(t == "礼貌")
-            btn.setStyleSheet(self._toggle_btn_style())
-            btn.setFixedHeight(26)
-            self._polish_tone_group.addButton(btn)
-            row1.addWidget(btn)
-            btn.clicked.connect(
-                lambda checked, tone=t: setattr(self, "_polish_selected_tone", tone)
-            )
-
         row1.addStretch()
 
         self._polish_btn = QPushButton("✨ 润色正文")
@@ -397,12 +379,10 @@ class ComposeDialog(QDialog):
                 None,
                 self._ai_processor.polish_email,
                 body,
-                self._polish_selected_tone,
             )
             # 保存润色前后文本用于隐式反馈
             self._pre_polish_text = body
             self._polished_text = polished
-            self._polish_tone = self._polish_selected_tone
             self._fill_draft(polished)
         except Exception as e:
             QMessageBox.warning(self, "润色失败", str(e))
@@ -428,14 +408,12 @@ class ComposeDialog(QDialog):
                 self._ai_processor.generate_email,
                 subject,
                 outline,
-                self._polish_selected_tone,
             )
             # 保存 AI 生成正文用于隐式反馈
             self._ai_draft_text = generated
             self._ai_draft_source = "generate_email"
             self._ai_draft_context = {
                 "outline": outline,
-                "tone": self._polish_selected_tone,
             }
             self._fill_draft(generated)
         except Exception as e:
@@ -489,31 +467,6 @@ class ComposeDialog(QDialog):
         stance_row.addStretch()
         vbox.addLayout(stance_row)
 
-        # ── 步骤2：风格选择（初始隐藏）──────────────────────────
-        self._tone_label = QLabel("步骤 2   选择回复风格：")
-        self._tone_label.hide()
-        vbox.addWidget(self._tone_label)
-
-        tone_container = QWidget()
-        tone_container.hide()
-        tone_row = QHBoxLayout(tone_container)
-        tone_row.setContentsMargins(0, 0, 0, 0)
-        tone_row.setSpacing(6)
-        self._tone_group = QButtonGroup(self)
-        self._tone_group.setExclusive(True)
-        for t in ["正式", "礼貌", "轻松", "简短"]:
-            btn = QPushButton(t)
-            btn.setCheckable(True)
-            btn.setStyleSheet(self._toggle_btn_style())
-            self._tone_group.addButton(btn)
-            tone_row.addWidget(btn)
-            btn.clicked.connect(
-                lambda checked, tone=t: self._on_tone_selected(tone)
-            )
-        tone_row.addStretch()
-        self._tone_container = tone_container
-        vbox.addWidget(tone_container)
-
         # ── 补充说明 + 生成按钮（初始隐藏）─────────────────────
         self._notes_label = QLabel("补充说明（可选）：")
         self._notes_label.hide()
@@ -549,11 +502,6 @@ class ComposeDialog(QDialog):
 
     def _on_stance_selected(self, stance: str):
         self._selected_stance = stance
-        self._tone_label.show()
-        self._tone_container.show()
-
-    def _on_tone_selected(self, tone: str):
-        self._selected_tone = tone
         self._notes_label.show()
         self._notes_input.show()
         self._gen_btn.show()
@@ -561,8 +509,8 @@ class ComposeDialog(QDialog):
     def _on_generate_draft(self):
         if not self._ai_processor or not self._source_email:
             return
-        if not self._selected_stance or not self._selected_tone:
-            QMessageBox.information(self, "提示", "请先选择回复立场和风格。")
+        if not self._selected_stance:
+            QMessageBox.information(self, "提示", "请先选择回复立场。")
             return
         self._gen_btn.setText("生成中…")
         self._gen_btn.setEnabled(False)
@@ -572,22 +520,32 @@ class ComposeDialog(QDialog):
         loop = asyncio.get_event_loop()
         try:
             _account_id = self._account.id if self._account else None
-            draft = await loop.run_in_executor(
-                None,
-                lambda: self._ai_processor.generate_reply_draft(
-                    self._source_email,
-                    self._selected_stance,
-                    self._selected_tone,
-                    self._notes_input.text().strip(),
-                    account_id=_account_id,
-                ),
-            )
+            draft = None
+            for attempt in range(3):
+                try:
+                    draft = await loop.run_in_executor(
+                        None,
+                        lambda: self._ai_processor.generate_reply_draft(
+                            self._source_email,
+                            self._selected_stance,
+                            self._notes_input.text().strip(),
+                            account_id=_account_id,
+                        ),
+                    )
+                    break
+                except RuntimeError as e:
+                    if "Cannot enter into task" in str(e) and attempt < 2:
+                        print(f"[Reply] 事件循环冲突，{1 + attempt}s 后重试")
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    raise
+            if draft is None:
+                raise RuntimeError("生成草稿多次重试后仍失败")
             # 保存 AI 草稿用于隐式反馈
             self._ai_draft_text = draft
             self._ai_draft_source = "reply_draft"
             self._ai_draft_context = {
                 "stance": self._selected_stance,
-                "tone": self._selected_tone,
             }
             self._fill_draft(draft)
         except Exception as e:
@@ -914,6 +872,7 @@ class ComposeDialog(QDialog):
             ratio = SequenceMatcher(
                 None, self._ai_draft_text, final_body
             ).ratio()
+            print(f"[Feedback] AI草稿 vs 最终版本 相似度={ratio:.2%} (source={self._ai_draft_source})")
             if ratio < 0.95:
                 source = self._ai_draft_source or "reply_draft"
                 # 确定 email_id
@@ -933,26 +892,27 @@ class ComposeDialog(QDialog):
                     user_final=final_body,
                     similarity_ratio=ratio,
                     stance=self._ai_draft_context.get("stance"),
-                    tone=self._ai_draft_context.get("tone"),
                     outline=self._ai_draft_context.get("outline"),
                     keywords=kw,
                     one_line=ol,
                 )
-                # Executor skill: 提取回复偏好记忆
+                # Learner skill: 提取回复偏好记忆
                 parent = self.parent()
-                if source == "reply_draft" and parent and hasattr(parent, "_run_executor_skill"):
-                    import asyncio as _aio
-                    _aio.ensure_future(parent._run_executor_skill(
+                if parent and hasattr(parent, "_launch_learner"):
+                    print(f"[Feedback] 触发 Learner: source={source}, email_id={email_id[:8]}")
+                    parent._launch_learner(
                         "reply_edit",
                         {
                             "ai_draft": self._ai_draft_text,
                             "user_edited": final_body,
                             "similarity": ratio,
                             "stance": self._ai_draft_context.get("stance"),
-                            "tone": self._ai_draft_context.get("tone"),
                         },
                         email_id,
-                    ))
+                    )
+                else:
+                    print(f"[Feedback] 未触发 Learner: parent={parent is not None}, "
+                          f"has_launch={hasattr(parent, '_launch_learner') if parent else '?'}")
 
         # ── 润色反馈 ──
         if self._polished_text is not None and final_body:
@@ -967,7 +927,6 @@ class ComposeDialog(QDialog):
                 self._db.record_polish_email_feedback(
                     email_id=email_id,
                     subject=subject,
-                    tone=self._polish_tone or "",
                     original_body=self._pre_polish_text or "",
                     polished_body=self._polished_text,
                     user_final=final_body,
@@ -1055,7 +1014,7 @@ class ComposeDialog(QDialog):
                     None,
                     lambda: _sp.run(
                         cmd,
-                        capture_output=True, text=True, timeout=120
+                        stdout=_sp.PIPE, stderr=None, encoding="utf-8", timeout=120
                     )
                 )
 

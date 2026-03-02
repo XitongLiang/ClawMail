@@ -8,6 +8,7 @@ generate_email.py - 新邮件生成
 
 import argparse
 import json
+from datetime import datetime
 import sys
 import logging
 from pathlib import Path
@@ -23,7 +24,7 @@ REFERENCES_DIR = Path(__file__).parent.parent / "references"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[generate] %(asctime)s %(levelname)s: %(message)s",
+    format="[Generate] %(asctime)s %(levelname)s: %(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
@@ -78,29 +79,65 @@ def read_user_profile() -> str:
     return ""
 
 
+_MEMORY_TTL_DAYS = {
+    "contact": None, "sender_importance": 180, "urgency_signal": 180,
+    "automated_content": 180, "summary_preference": 180,
+    "response_pattern": 180, "project_state": 90,
+}
+_DEFAULT_TTL_DAYS = 120
+
+
+def _memory_age_days(m: dict) -> int:
+    ts = m.get("last_updated") or m.get("created_at")
+    if not ts:
+        return 0
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return max(0, (datetime.now(dt.tzinfo) - dt).days)
+    except (ValueError, TypeError):
+        return 0
+
+
 def format_memories(memories: dict) -> str:
+    """格式化偏好记忆，按类型 TTL 过滤，附带年龄标签。"""
     items = memories.get("memories", [])
-    if not items:
+    filtered = []
+    for m in items:
+        mtype = m.get("memory_type", "")
+        ttl = _MEMORY_TTL_DAYS.get(mtype, _DEFAULT_TTL_DAYS)
+        age = _memory_age_days(m)
+        if ttl is not None and age > ttl:
+            continue
+        filtered.append((m, age))
+    if not filtered:
         return "（无历史记忆）"
     lines = []
-    for m in items:
+    for m, age in filtered:
         content = m.get("memory_content", {})
         if isinstance(content, dict):
             content = json.dumps(content, ensure_ascii=False)
-        lines.append(
-            f"- [{m.get('memory_type')}] {m.get('memory_key', '全局')}: {content}"
-        )
+        key = m.get("memory_key") or "全局"
+        if age <= 1:
+            age_tag = "今天"
+        elif age <= 7:
+            age_tag = f"{age}天前"
+        elif age <= 30:
+            age_tag = f"{age // 7}周前"
+        else:
+            age_tag = f"{age // 30}个月前"
+        lines.append(f"- [{m.get('memory_type', '?')}] {key}: {content} ({age_tag})")
     return "\n".join(lines)
 
 
 def generate_email(
-    subject: str, outline: str, tone: str, account_id: str
+    subject: str, outline: str, account_id: str
 ) -> str:
-    """生成新邮件，返回纯文本正文。"""
-    logger.info("生成新邮件: subject=%s tone=%s", subject, tone)
+    """生成新邮件，返回纯文本正文。语气风格由 LLM 根据记忆自动判断。"""
+    logger.info("生成新邮件: subject=%s", subject)
 
     # 获取用户记忆
-    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}") if account_id else {}
+    # 新邮件无收件人上下文，只拉全局偏好
+    memories = _http_get(f"{CLAWMAIL_API}/memories/{account_id}/for-email") if account_id else {}
     user_profile = read_user_profile()
 
     # 加载 references
@@ -128,16 +165,18 @@ def generate_email(
 
 主题: {subject}
 大纲/要点: {outline}
-目标语气: {tone}"""
+语气风格: 根据用户偏好记忆（response_pattern）自动判断。如无相关记忆，默认使用礼貌风格。"""
 
     return call_llm(system_prompt, user_prompt)
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="生成新邮件")
     parser.add_argument("--subject", required=True)
     parser.add_argument("--outline", required=True)
-    parser.add_argument("--tone", required=True)
     parser.add_argument("--account-id", default="")
     parser.add_argument("--clawmail-api", default="http://127.0.0.1:9999")
     parser.add_argument(
@@ -154,7 +193,7 @@ def main():
     LLM_TOKEN = args.llm_token
 
     try:
-        result = generate_email(args.subject, args.outline, args.tone, args.account_id)
+        result = generate_email(args.subject, args.outline, args.account_id)
         print(result)
     except Exception as e:
         logger.error("生成邮件失败: %s", e, exc_info=True)

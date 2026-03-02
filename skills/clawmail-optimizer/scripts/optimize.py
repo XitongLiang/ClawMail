@@ -33,7 +33,7 @@ RATE_LIMIT_HOURS = 24        # 同一 prompt-type 的最短优化间隔
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[optimizer] %(asctime)s %(levelname)s: %(message)s",
+    format="[Optimizer] %(asctime)s %(levelname)s: %(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
@@ -394,6 +394,184 @@ def optimize(prompt_type: str, account_id: str, dry_run: bool = False) -> dict:
     return result
 
 
+# ── 记忆清洗 ──────────────────────────────────────────────────────
+
+_CLEAN_SYSTEM_PROMPT = (
+    "你是一个 JSON 输出机器。你的唯一任务是根据用户的指令返回一个 JSON 数组。"
+    "不要输出任何分析过程、解释、Markdown 标记或其他文字。"
+    "只输出一个合法的 JSON 数组，以 [ 开头，以 ] 结尾。"
+)
+
+_CLEAN_USER_PROMPT = """你是 ClawMail 的记忆清洗引擎。
+
+以下是用户的全部 AI 偏好记忆。请分析这些记忆，执行清洗操作：
+
+【全部记忆】
+{memories_text}
+
+【清洗规则】
+1. **合并重复**：相同 memory_type + 相同/相似 memory_key 的多条记忆 → 合并为一条
+   - 合并后 evidence_count = 各条之和
+   - confidence = 取较高值
+   - content 合并关键信息
+
+2. **解决矛盾**：同一 key 但 content 含义矛盾的记忆
+   - 保留 evidence_count 更高 / 更新鲜的那条
+   - 删除另一条
+
+3. **标注 skill_defect**：content 中 _source="skill_defect" 的记忆
+   - 这些是 AI 算法/prompt 本身的问题，不是用户个性化偏好
+   - 提取出来放到 defect_summary 中，方便后续优化 prompt
+
+【输出要求】
+返回 JSON 数组，每个元素是一个操作：
+[
+  {{"op": "merge", "keep_id": "保留的记忆ID", "delete_ids": ["被合并删除的ID"], "merged_content": {{}}, "merged_evidence": 5, "merged_confidence": 0.8}},
+  {{"op": "delete", "memory_id": "要删除的ID", "reason": "矛盾/过时/无意义"}},
+  {{"op": "flag_defect", "memory_id": "skill_defect记忆ID", "defect_type": "importance/summary/reply/category", "description": "缺陷描述"}}
+]
+
+如果不需要任何清洗操作，返回空数组：[]
+直接返回 JSON 数组，不要 Markdown 标记或解释文字。"""
+
+
+def clean_memories(account_id: str, dry_run: bool = False) -> dict:
+    """清洗用户记忆：合并重复、解决矛盾、标注 skill_defect。"""
+    result = {"status": "skipped", "operations": [], "defects": []}
+
+    # 获取全部记忆
+    memories_resp = api_get(f"/memories/{account_id}")
+    entries = memories_resp.get("memories", [])
+    if len(entries) < 5:
+        logger.info("记忆不足 5 条，跳过清洗")
+        result["status"] = "insufficient"
+        result["memory_count"] = len(entries)
+        return result
+
+    # 格式化为 LLM 输入
+    mem_lines = []
+    for m in entries:
+        mem_lines.append(
+            f"[id={m.get('id', '?')}] type={m.get('memory_type')}, "
+            f"key={m.get('memory_key')}, "
+            f"evidence={m.get('evidence_count', 1)}, "
+            f"confidence={m.get('confidence_score', 0):.2f}, "
+            f"content={json.dumps(m.get('memory_content', {}), ensure_ascii=False)}, "
+            f"updated={m.get('last_updated', '?')}"
+        )
+    memories_text = "\n".join(mem_lines)
+
+    user_prompt = _CLEAN_USER_PROMPT.format(memories_text=memories_text)
+
+    logger.info("调用 LLM 清洗 %d 条记忆...", len(entries))
+    raw = call_llm(_CLEAN_SYSTEM_PROMPT, user_prompt)
+
+    # 复用 learner 的 JSON 解析
+    import re as _re
+    text = raw.strip()
+    text = _re.sub(r"^```(?:json)?\s*", "", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"\s*```\s*$", "", text)
+    try:
+        operations = json.loads(text)
+        if not isinstance(operations, list):
+            operations = []
+    except (json.JSONDecodeError, ValueError):
+        match = _re.search(r'\[.*\]', text, flags=_re.DOTALL)
+        operations = json.loads(match.group()) if match else []
+
+    if not operations:
+        logger.info("LLM 判断无需清洗")
+        result["status"] = "clean"
+        return result
+
+    logger.info("LLM 返回 %d 条清洗操作", len(operations))
+
+    if dry_run:
+        result["status"] = "dry_run"
+        result["operations"] = operations
+        return result
+
+    # 执行清洗操作
+    applied = 0
+    defects = []
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        action = op.get("op", "")
+        try:
+            if action == "merge":
+                # 更新保留的记忆
+                keep_id = op.get("keep_id")
+                delete_ids = op.get("delete_ids", [])
+                if keep_id and delete_ids:
+                    api_post(f"/memories/{account_id}", {
+                        "op": "update",
+                        "memory_id": keep_id,
+                        "content": op.get("merged_content", {}),
+                        "confidence": op.get("merged_confidence", 0.7),
+                    })
+                    for did in delete_ids:
+                        api_post(f"/memories/{account_id}", {
+                            "op": "delete", "memory_id": did,
+                        })
+                    applied += 1
+                    logger.info("MERGE: keep=%s, delete=%s", keep_id, delete_ids)
+
+            elif action == "delete":
+                mid = op.get("memory_id")
+                if mid:
+                    api_post(f"/memories/{account_id}", {
+                        "op": "delete", "memory_id": mid,
+                    })
+                    applied += 1
+                    logger.info("DELETE: %s reason=%s", mid, op.get("reason", ""))
+
+            elif action == "flag_defect":
+                defects.append({
+                    "memory_id": op.get("memory_id"),
+                    "defect_type": op.get("defect_type", "unknown"),
+                    "description": op.get("description", ""),
+                })
+                logger.info("DEFECT: type=%s desc=%s",
+                            op.get("defect_type"), op.get("description", "")[:50])
+
+        except Exception as e:
+            logger.warning("清洗操作失败 %s: %s", action, e)
+
+    result["status"] = "completed"
+    result["applied"] = applied
+    result["defects"] = defects
+    result["memory_count"] = len(entries)
+
+    # 如果有 skill_defect，尝试触发对应 prompt-type 的优化
+    if defects and not dry_run:
+        _trigger_defect_optimization(defects, account_id)
+
+    return result
+
+
+def _trigger_defect_optimization(defects: list, account_id: str) -> None:
+    """根据 skill_defect 类型触发对应的 prompt 优化。"""
+    # defect_type → prompt_type 映射
+    defect_to_prompt = {
+        "importance": "importance_score",
+        "summary": "summary",
+        "reply": "email_generation",
+        "category": "importance_score",  # 分类规则在 importance 算法中
+    }
+    triggered = set()
+    for d in defects:
+        pt = defect_to_prompt.get(d.get("defect_type", ""))
+        if pt and pt not in triggered:
+            triggered.add(pt)
+            logger.info("Skill 缺陷触发优化: defect_type=%s → prompt_type=%s",
+                        d.get("defect_type"), pt)
+            try:
+                optimize(pt, account_id, dry_run=False)
+            except Exception as e:
+                logger.warning("缺陷触发优化失败 %s: %s", pt, e)
+
+
 # ── 辅助函数 ──────────────────────────────────────────────────────
 
 def _format_memories(memories: dict) -> str:
@@ -457,13 +635,20 @@ def _simple_diff(original: str, rewritten: str) -> str:
 # ── CLI 入口 ──────────────────────────────────────────────────────
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(
-        description="clawmail-optimizer: 根据用户反馈自动优化 Skill prompt 文件",
+        description="clawmail-optimizer: 根据用户反馈自动优化 Skill prompt 文件 / 清洗记忆",
     )
     parser.add_argument(
-        "--prompt-type", required=True,
+        "--mode", choices=["optimize", "clean"], default="optimize",
+        help="运行模式: optimize=优化prompt, clean=清洗记忆",
+    )
+    parser.add_argument(
+        "--prompt-type",
         choices=list(PROMPT_TYPE_CONFIG.keys()),
-        help="要优化的 prompt 类型",
+        help="要优化的 prompt 类型（optimize 模式必填）",
     )
     parser.add_argument("--account-id", default="", help="账户 ID")
     parser.add_argument("--dry-run", action="store_true", help="只预览变更，不实际修改文件")
@@ -491,13 +676,21 @@ def main():
     MIN_FEEDBACK_COUNT = args.min_feedback
 
     try:
-        result = optimize(args.prompt_type, args.account_id, dry_run=args.dry_run)
+        if args.mode == "clean":
+            if not args.account_id:
+                print(json.dumps({"status": "error", "error": "clean 模式需要 --account-id"}))
+                sys.exit(1)
+            result = clean_memories(args.account_id, dry_run=args.dry_run)
+        else:
+            if not args.prompt_type:
+                print(json.dumps({"status": "error", "error": "optimize 模式需要 --prompt-type"}))
+                sys.exit(1)
+            result = optimize(args.prompt_type, args.account_id, dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        sys.exit(0 if result["status"] in ("completed", "dry_run", "no_changes") else 1)
+        sys.exit(0 if result["status"] in ("completed", "clean", "dry_run", "no_changes") else 1)
     except Exception as e:
-        logger.exception("优化失败")
+        logger.exception("执行失败")
         error_result = {
-            "prompt_type": args.prompt_type,
             "status": "error",
             "error": str(e),
         }

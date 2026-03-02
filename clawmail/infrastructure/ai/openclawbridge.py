@@ -15,7 +15,7 @@ class OpenClawBridge:
     """
     同步 AI 调用封装。在 Plugin 层通过 run_in_executor 转为异步。
 
-    统一方法 user_chat() 处理所有 agent 调用，通过 user_id 区分 agent。
+    通过 user_chat() 方法与 OpenClaw 网关交互。
     """
 
     def __init__(
@@ -37,7 +37,7 @@ class OpenClawBridge:
         user_id: str = "userAgent001",
         system_prompt: Optional[str] = None,
     ) -> str:
-        """统一 AI 调用方法，通过 user_id 区分 agent。
+        """AI 对话调用。
         system_prompt: 可选 system 消息，用于强制输出格式（如 JSON-only）。
         """
         messages = []

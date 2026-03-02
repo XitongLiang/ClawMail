@@ -16,32 +16,51 @@ python scripts/analyze_email.py \
 ```
 
 执行流程：
-1. 从 ClawMail REST API 获取邮件数据、用户记忆、pending facts
+1. 从 ClawMail REST API 获取邮件数据、按发件人过滤的用户记忆、pending facts
 2. 读取 USER.md 用户侧写
-3. LLM Call 1：邮件分析（summary + categories + importance + actions + stances）
-4. LLM Call 2：事实提取（pending facts）
-5. 通过 REST API 写回分析结果和 pending facts
+3. 单次 LLM 调用：邮件分析 + 事实提取合并
+4. Python 后处理：默认值补全、importance 加权计算、事实分流
+5. 通过 REST API 写回分析结果、MemoryBank 记忆、pending facts
 
 ## REST API 依赖
 
 | 端点 | 方法 | 用途 |
 |------|------|------|
 | `/emails/{id}` | GET | 获取邮件完整数据 |
-| `/memories/{account_id}` | GET | 获取用户偏好记忆 |
-| `/pending-facts/{account_id}` | GET | 获取已有 pending facts |
+| `/emails/thread/{thread_id}` | GET | 获取线程上下文（回复邮件） |
+| `/memories/{account_id}/for-email?sender_email=` | GET | 获取与当前邮件相关的偏好记忆（全局 + 发件人 + 域名） |
+| `/pending-facts/{account_id}` | GET | 获取已有 pending facts（避免重复提取） |
 | `/emails/{id}/ai-metadata` | POST | 写入分析结果 |
-| `/pending-facts/{account_id}` | POST | 写入新 pending facts |
-| `/pending-facts/{account_id}/promote` | POST | 触发 pending fact 提升 |
+| `/memories/{account_id}` | POST | 直接写入 MemoryBank（contact/project 事实） |
+| `/pending-facts/{account_id}` | POST | 写入 pending facts（career/org 事实） |
+| `/pending-facts/{account_id}/promote` | POST | 触发 pending fact 提升到 USER.md |
 
 ## LLM 调用
 
 通过 OpenClaw Gateway（`http://127.0.0.1:18789/v1/chat/completions`），OpenAI 兼容 API。
 
-每次邮件分析包含 2 次 LLM 调用：
-- Call 1：邮件分析（融合 references/prompts/ 基准线 + USER.md + 记忆）
-- Call 2：事实提取（融合 profile_extraction.md + 现有 pending facts）
+每次邮件分析包含 **1 次 LLM 调用**，同时完成分析和事实提取。
+LLM 输出的 `importance_scores`（四维度）由 Python 加权计算最终 `importance_score`。
 
-用户撰写习惯提取包含 1 次 LLM 调用。
+## 记忆注入
+
+记忆按发件人过滤后注入 prompt，避免无关记忆浪费 token：
+- 全局偏好（memory_key IS NULL）：urgency_signal、summary_preference 等
+- 发件人级别：sender_importance、response_pattern 等
+- 域名级别：automated_content 等
+
+注入时按 memory_type 做 TTL 过滤：contact 永不过期，project 90天，偏好类 180天。
+每条记忆附带年龄标签（如"2天前""3个月前"），帮助 LLM 判断时效性。
+
+## 事实分流
+
+LLM 提取的 `pending_facts` 按 fact_key 分流到不同存储：
+
+| fact_key 前缀 | 目标 | 理由 |
+|---------------|------|------|
+| `contact.*` | MemoryBank（直接写入） | 关系记忆，立即生效，可更新 |
+| `project.*` | MemoryBank（直接写入，带 extracted_date） | 项目信息有时效性，需要可更新/清理 |
+| `career.*` / `org.*` | pending facts → 积累 → USER.md | 稳定个人属性，需多封邮件交叉验证 |
 
 ## 输出格式
 

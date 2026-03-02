@@ -9,23 +9,58 @@ ClawMail Task Handler - 自动处理待办任务
 
 import argparse
 import json
-import re
+import os
 import sys
-from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import requests
+import urllib.request
+import urllib.error
 
 CLAWMAIL_API = "http://127.0.0.1:9999"
 
 
 class TaskHandler:
     """ClawMail 待办任务处理器"""
-    
+
     def __init__(self, api_base: str = CLAWMAIL_API):
         self.api = api_base
         self.timeout = 60
-    
+
+    # ----------------------------------------------------------------
+    # HTTP helpers (stdlib only, no requests dependency)
+    # ----------------------------------------------------------------
+
+    def _http_get(self, url: str, timeout: int = None) -> Optional[Dict]:
+        """GET 请求，返回 JSON dict 或 None。"""
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[HTTP GET] {url} 失败: {e}")
+        return None
+
+    def _http_post(self, url: str, payload: dict,
+                   timeout: int = None) -> Optional[Dict]:
+        """POST JSON 请求，返回 JSON dict 或 None。"""
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read().decode("utf-8"))
+                else:
+                    print(f"[HTTP POST] {url} 返回 {resp.status}")
+        except Exception as e:
+            print(f"[HTTP POST] {url} 失败: {e}")
+        return None
+
     def process_task(self, task_id: str, dry_run: bool = False) -> Dict:
         """处理单个任务"""
         print(f"\n{'='*50}")
@@ -50,32 +85,44 @@ class TaskHandler:
         print(f"关联邮件: {email.get('subject')}")
         print(f"发件人: {email.get('from_name')} <{email.get('from')}>")
         
-        # 3. 识别任务类型并生成选项
+        # 3. proactive 任务交给 agent 自主执行
+        if task.get('source_type') == 'proactive':
+            print("\n任务类型: proactive (agent 模式)")
+            if dry_run:
+                return {"success": True, "dry_run": True, "message": "proactive agent would run"}
+            from agent import ProactiveAgent
+            agent_result = ProactiveAgent().run(task, email)
+            if agent_result.get('success') and agent_result.get('action') != 'cancelled':
+                self._complete_task(task_id)
+                print(f"[OK] 任务已标记为完成 (action={agent_result.get('action')})")
+            return {"success": agent_result.get('success'), "task_id": task_id, "details": agent_result}
+
+        # 4. 非 proactive 任务：识别类型并生成选项
         task_type, options = self._analyze_task(task, email)
         print(f"\n任务类型: {task_type}")
-        
+
         if dry_run:
             print("\n[测试模式] 生成的选项:")
             for opt in options:
                 print(f"  - {opt['id']}: {opt['label']}")
             return {"success": True, "dry_run": True, "options": options}
-        
-        # 4. 显示确认弹窗
+
+        # 5. 显示确认弹窗
         dialog_result = self._show_confirm_dialog(task, options)
         if not dialog_result.get('success'):
             return {"success": False, "error": dialog_result.get('error', 'Dialog cancelled')}
-        
+
         selected = dialog_result.get('selected_option_id')
         print(f"\n用户选择: {selected}")
-        
-        # 5. 执行操作
+
+        # 6. 执行操作
         action_result = self._execute_action(selected, options, email)
-        
-        # 6. 标记任务完成（如果执行成功）
+
+        # 7. 标记任务完成（如果执行成功）
         if action_result.get('success'):
             self._complete_task(task_id)
             print("[OK] 任务已标记为完成")
-        
+
         return {
             "success": action_result.get('success'),
             "task_id": task_id,
@@ -97,51 +144,29 @@ class TaskHandler:
     
     def _get_task(self, task_id: str) -> Optional[Dict]:
         """获取任务详情"""
-        try:
-            resp = requests.get(f"{self.api}/tasks/{task_id}", timeout=self.timeout)
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception as e:
-            print(f"获取任务失败: {e}")
-        return None
+        return self._http_get(f"{self.api}/tasks/{task_id}")
     
     def _get_pending_tasks(self) -> List[Dict]:
         """获取所有待处理任务"""
-        try:
-            resp = requests.get(f"{self.api}/tasks?status=pending&limit=50", timeout=self.timeout)
-            if resp.status_code == 200:
-                return resp.json().get('tasks', [])
-        except Exception as e:
-            print(f"获取任务列表失败: {e}")
-        return []
+        data = self._http_get(f"{self.api}/tasks?status=pending&limit=50")
+        return (data or {}).get('tasks', [])
     
     def _get_source_email(self, task_id: str) -> Optional[Dict]:
         """获取任务关联的源邮件"""
-        try:
-            resp = requests.get(f"{self.api}/tasks/{task_id}/email", timeout=self.timeout)
-            if resp.status_code == 200:
-                return resp.json().get('email')
-        except Exception as e:
-            print(f"获取邮件失败: {e}")
-        return None
+        data = self._http_get(f"{self.api}/tasks/{task_id}/email")
+        return (data or {}).get('email')
     
     def _analyze_task(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
-        """分析任务类型并生成选项"""
+        """分析非 proactive 任务类型并生成选项。"""
         title = task.get('title', '').lower()
         subject = email.get('subject', '').lower()
-        body = email.get('body', '').lower()
-        
-        # 会议时间确认
+
         if any(kw in title + subject for kw in ['会议', '时间', '确认', '下午', '上午']):
             return self._generate_meeting_options(task, email)
-        
-        # 邮件回复
         if any(kw in title for kw in ['回复', '跟进', 're:', '答复']):
             return self._generate_reply_options(task, email)
-        
-        # 通用处理
         return self._generate_generic_options(task, email)
-    
+
     def _generate_meeting_options(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
         """生成会议确认选项"""
         body = email.get('body', '')
@@ -264,7 +289,7 @@ Tony"""
     def _show_confirm_dialog(self, task: Dict, options: List[Dict]) -> Dict:
         """显示确认弹窗"""
         dialog_options = [{"id": opt["id"], "label": opt["label"]} for opt in options]
-        
+
         payload = {
             "title": "AI待办处理确认",
             "message": f"任务：{task.get('title')}\n\n请选择处理方式：",
@@ -272,33 +297,30 @@ Tony"""
             "default_option_id": dialog_options[0]["id"] if dialog_options else None,
             "timeout_seconds": 60
         }
-        
-        try:
-            resp = requests.post(
-                f"{self.api}/ui/confirm-dialog",
-                json=payload,
-                timeout=70
-            )
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception as e:
-            print(f"弹窗显示失败: {e}")
-        
-        return {"success": False, "error": "Dialog failed"}
+
+        result = self._http_post(f"{self.api}/ui/confirm-dialog", payload, timeout=70)
+        return result or {"success": False, "error": "Dialog failed"}
     
     def _execute_action(self, selected_id: str, options: List[Dict], email: Dict) -> Dict:
         """执行选中的操作"""
         selected_opt = next((opt for opt in options if opt["id"] == selected_id), None)
         if not selected_opt:
             return {"success": False, "error": "Invalid option"}
-        
+
         action = selected_opt.get("action")
-        
+        attachments = selected_opt.get("attachments", [])
+
         if action == "send_reply":
-            return self._send_reply(email, selected_opt.get("reply_body", ""))
-        
+            return self._send_reply(
+                email, selected_opt.get("reply_body", ""),
+                attachments=attachments,
+            )
+
         elif action == "open_compose":
-            return {"success": True, "action": "opened_compose", "note": "请手动编辑发送"}
+            return self._open_compose(
+                email, selected_opt.get("reply_body", ""),
+                attachments=attachments,
+            )
         
         elif action == "complete":
             return {"success": True, "action": "marked_complete"}
@@ -311,44 +333,46 @@ Tony"""
         
         return {"success": False, "error": "Unknown action"}
     
-    def _send_reply(self, email: Dict, reply_body: str) -> Dict:
-        """发送回复邮件"""
+    def _send_reply(self, email: Dict, reply_body: str,
+                    attachments: List[str] = None) -> Dict:
+        """发送回复邮件（可选附件）"""
         email_id = email.get('id')
         if not email_id:
             return {"success": False, "error": "No email ID"}
-        
+
         payload = {
             "email_id": email_id,
             "reply_body": reply_body,
-            "reply_all": False
+            "reply_all": False,
         }
-        
-        try:
-            resp = requests.post(
-                f"{self.api}/send-reply",
-                json=payload,
-                timeout=self.timeout
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                print(f"[OK] 邮件已发送: {data.get('sent_at')}")
-                return {"success": True, "sent_at": data.get('sent_at')}
-            else:
-                return {"success": False, "error": f"HTTP {resp.status_code}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        if attachments:
+            payload["attachments"] = attachments
+
+        result = self._http_post(f"{self.api}/send-reply", payload)
+        if result:
+            print(f"[OK] 邮件已发送: {result.get('sent_at')}")
+            return {"success": True, "sent_at": result.get('sent_at')}
+        return {"success": False, "error": "send-reply 请求失败"}
+
+    def _open_compose(self, email: Dict, reply_body: str,
+                      attachments: List[str] = None) -> Dict:
+        """通过 API 打开撰写窗口（带预填内容和附件）"""
+        payload = {
+            "email_id": email.get('id'),
+            "reply_body": reply_body,
+        }
+        if attachments:
+            payload["attachments"] = attachments
+
+        result = self._http_post(f"{self.api}/compose", payload)
+        if result is not None:
+            return {"success": True, "action": "opened_compose"}
+        return {"success": False, "error": "compose 请求失败"}
     
     def _complete_task(self, task_id: str) -> bool:
         """标记任务完成"""
-        try:
-            resp = requests.post(
-                f"{self.api}/tasks/{task_id}/complete",
-                timeout=self.timeout
-            )
-            return resp.status_code == 200
-        except Exception as e:
-            print(f"标记完成失败: {e}")
-            return False
+        result = self._http_post(f"{self.api}/tasks/{task_id}/complete", {})
+        return result is not None
 
 
 def main():

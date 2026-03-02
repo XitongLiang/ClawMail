@@ -14,6 +14,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from clawmail.domain.models.email import EmailAIMetadata
 from clawmail.infrastructure.ai.ai_processor import AIProcessor, AIProcessingError
 from clawmail.infrastructure.database.storage_manager import ClawDB
+from clawmail.services.proactive_detector import detect_proactive_actions
 
 # 重试配置
 MAX_RETRIES = 3
@@ -31,6 +32,7 @@ class AIService(QObject):
 
     email_processed    = pyqtSignal(str, str)  # (email_id, ai_status)
     processing_started = pyqtSignal(str, int)   # (email_id, queue_remaining) — 开始处理单封邮件
+    proactive_actions_detected = pyqtSignal(str, list)  # (email_id, actions) — 检测到可代理行动
 
     def __init__(self, db: ClawDB, ai_processor: AIProcessor, move_callback=None):
         super().__init__()
@@ -120,6 +122,14 @@ class AIService(QObject):
                         await self._move_callback(email_id, email.imap_uid, "INBOX", "垃圾邮件")
                 # 行动项存入 email_ai_metadata，由用户在邮件详情页手动选择加入待办
                 self.email_processed.emit(email_id, meta.ai_status)
+                # 主动行动检测：仅对收件（非已发送）且分析成功的邮件
+                if not is_sent and meta.ai_status == "processed":
+                    try:
+                        proactive = detect_proactive_actions(meta)
+                        if proactive:
+                            self.proactive_actions_detected.emit(email_id, proactive)
+                    except Exception as e:
+                        print(f"[AIService] 主动行动检测失败: {e}")
                 return
 
             except AIProcessingError as e:
@@ -127,6 +137,16 @@ class AIService(QObject):
                 print(f"[AIService] 处理邮件 {email_id[:8]} 第{attempt+1}次失败: {e}")
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(RETRY_BACKOFF[attempt])
+
+            except RuntimeError as e:
+                if "Cannot enter into task" in str(e):
+                    # qasync re-entrancy: 另一个 async task 正在执行，稍后重试
+                    print(f"[AIService] 邮件 {email_id[:8]} 遇到事件循环冲突，1s 后重试")
+                    await asyncio.sleep(1)
+                    continue
+                last_error = str(e)
+                print(f"[AIService] 处理邮件 {email_id[:8]} 意外错误: {e}")
+                break
 
             except Exception as e:
                 last_error = str(e)

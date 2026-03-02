@@ -23,7 +23,7 @@ REFERENCES_DIR = Path(__file__).parent.parent / "references"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[executor] %(asctime)s %(levelname)s: %(message)s",
+    format="[Learner] %(asctime)s %(levelname)s: %(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
@@ -35,10 +35,10 @@ _SYSTEM_PROMPT = (
     "只输出一个合法的 JSON 数组，以 [ 开头，以 ] 结尾。"
 )
 
-# Executor prompt 模板（与 executor.py 对齐，逐个应用所有技能）
-_EXECUTOR_PROMPT = """你是 ClawMail 的个性化记忆管理执行器。
+# Learner prompt 模板（逐个应用所有技能分析用户修正）
+_LEARNER_PROMPT = """你是 ClawMail 的个性化记忆学习器。
 
-你的任务：分析 AI 预测与用户修正之间的差异，从中提取用户偏好并输出记忆操作。
+你的任务：分析 AI 预测与用户修正之间的差异，判断修正原因并输出对应操作。
 
 【当前邮件】
 {email_data}
@@ -55,8 +55,20 @@ _EXECUTOR_PROMPT = """你是 ClawMail 的个性化记忆管理执行器。
 【可用技能（全部应用）】
 {skills}
 
+【修正原因分类】
+每条操作必须标注 "source" 字段，区分修正原因：
+
+1. "user_preference" — 用户个性化偏好
+   特征：和用户的身份、关系、习惯相关，换一个人可能会给出不同修正
+   例子：用户觉得老板的邮件应该更重要、用户偏好简短摘要、用户喜欢正式语气
+
+2. "skill_defect" — Skill/Prompt 自身缺陷
+   特征：客观上 AI 判断有误，大多数人都会做出相同修正
+   例子：邮件明确写了"紧急"但评分很低、摘要遗漏了邮件核心内容、分类明显错误
+
 【指令】
-- 逐个应用上述技能，分析用户修正背后的偏好
+- 逐个应用上述技能，分析用户修正背后的原因
+- 先判断修正属于 user_preference 还是 skill_defect
 - 如果发现新偏好，输出 INSERT 操作
 - 如果已有记忆需要更新（同一发件人/同类偏好），输出 UPDATE 操作并指定 memory_id
 - 如果已有记忆明显错误，输出 DELETE 操作
@@ -66,8 +78,9 @@ _EXECUTOR_PROMPT = """你是 ClawMail 的个性化记忆管理执行器。
 【输出要求】
 严格返回 JSON 数组，不要 Markdown 标记：
 [
-  {{"op": "insert", "memory_type": "类型", "memory_key": "键或null", "content": {{}}, "confidence": 0.7}},
-  {{"op": "update", "memory_id": "已有记忆ID", "content": {{}}, "confidence": 0.8}},
+  {{"op": "insert", "source": "user_preference", "memory_type": "类型", "memory_key": "键或null", "content": {{}}, "confidence": 0.7}},
+  {{"op": "insert", "source": "skill_defect", "memory_type": "类型", "memory_key": "键或null", "content": {{"defect": "缺陷描述", "expected": "期望行为", "evidence": "邮件中的依据"}}, "confidence": 0.8}},
+  {{"op": "update", "source": "user_preference", "memory_id": "已有记忆ID", "content": {{}}, "confidence": 0.8}},
   {{"op": "delete", "memory_id": "已有记忆ID", "reason": "原因"}}
 ]
 
@@ -164,23 +177,32 @@ def validate_operations(operations: list) -> list:
     return valid
 
 
-def apply_operations(account_id: str, operations: list) -> int:
-    """通过 REST API 将记忆操作写入 MemoryBank，返回成功数量。"""
+def apply_operations(account_id: str, operations: list) -> dict:
+    """通过 REST API 将记忆操作写入 MemoryBank。
+    返回 {"applied": N, "skill_defects": [...]} 供调用方统计。"""
     count = 0
+    skill_defects = []
     for op in operations:
         action = op.get("op", "").lower()
+        source = op.get("source", "user_preference")
         try:
             if action == "insert":
+                content = op.get("content", {})
+                # 将 source 标签存入 memory_content 方便后续清洗
+                if isinstance(content, dict):
+                    content["_source"] = source
                 payload = {
                     "memory_type": op["memory_type"],
                     "memory_key": op.get("memory_key"),
-                    "memory_content": op.get("content", {}),
+                    "memory_content": content,
                     "confidence_score": float(op.get("confidence", 0.5)),
                     "evidence_count": 1,
                 }
                 _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", payload)
                 count += 1
-                logger.info("INSERT: type=%s key=%s", op["memory_type"], op.get("memory_key"))
+                logger.info("INSERT [%s]: type=%s key=%s", source, op["memory_type"], op.get("memory_key"))
+                if source == "skill_defect":
+                    skill_defects.append(content)
 
             elif action == "update":
                 payload = {
@@ -191,7 +213,7 @@ def apply_operations(account_id: str, operations: list) -> int:
                 }
                 _http_post_json(f"{CLAWMAIL_API}/memories/{account_id}", payload)
                 count += 1
-                logger.info("UPDATE: memory_id=%s", op["memory_id"])
+                logger.info("UPDATE [%s]: memory_id=%s", source, op["memory_id"])
 
             elif action == "delete":
                 payload = {"op": "delete", "memory_id": op["memory_id"]}
@@ -202,7 +224,7 @@ def apply_operations(account_id: str, operations: list) -> int:
         except Exception as e:
             logger.warning("操作失败 %s: %s", action, e)
 
-    return count
+    return {"applied": count, "skill_defects": skill_defects}
 
 
 def extract_preference(
@@ -273,6 +295,14 @@ def extract_preference(
     elif feedback_type == "category_change":
         prediction = f"原始分类: {feedback_data.get('original_categories', [])}"
         correction = f"用户修改为: {feedback_data.get('user_categories', [])}"
+    elif feedback_type == "implicit_open":
+        score = feedback_data.get("importance_score", "?")
+        prediction = f"AI 重要性评分: {score}/100"
+        correction = "用户从未读邮件列表中主动点开了这封邮件（隐式正向信号：这封邮件对用户比较重要）"
+    elif feedback_type == "implicit_delete_unread":
+        score = feedback_data.get("importance_score", "?")
+        prediction = f"AI 重要性评分: {score}/100"
+        correction = "用户没有阅读就直接删除了这封未读邮件（隐式负向信号：这封邮件对用户不重要）"
     else:
         prediction = f"AI 预测: {json.dumps(feedback_data.get('original', {}), ensure_ascii=False)}"
         correction = f"用户修正: {json.dumps(feedback_data.get('corrected', {}), ensure_ascii=False)}"
@@ -281,7 +311,7 @@ def extract_preference(
     skills_text = format_skills_from_reference(load_reference("prompts/memory_types.md"))
 
     # ── Step 1: LLM Call ──
-    user_prompt = _EXECUTOR_PROMPT.format(
+    user_prompt = _LEARNER_PROMPT.format(
         email_data=email_text,
         prediction=prediction,
         correction=correction,
@@ -289,7 +319,7 @@ def extract_preference(
         skills=skills_text,
     )
 
-    logger.info("调用 LLM (executor)...")
+    logger.info("调用 LLM (learner)...")
     raw = call_llm(_SYSTEM_PROMPT, user_prompt)
     operations = validate_operations(parse_json_array_from_llm(raw))
 
@@ -299,21 +329,29 @@ def extract_preference(
 
     # ── Step 2: 写入 MemoryBank ──
     logger.info("LLM 返回 %d 条操作: %s", len(operations), [op.get("op") for op in operations])
-    count = apply_operations(account_id, operations)
+    result = apply_operations(account_id, operations)
+    count = result["applied"]
 
     logger.info("记忆操作完成: %d/%d 条成功", count, len(operations))
+    if result["skill_defects"]:
+        logger.info("发现 %d 条 skill 缺陷记录", len(result["skill_defects"]))
     return {
         "status": "success",
         "operations_total": len(operations),
         "operations_applied": count,
+        "skill_defects": result["skill_defects"],
         "feedback_type": feedback_type,
     }
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="用户偏好提取")
     parser.add_argument("--feedback-type", required=True,
-                        choices=["importance_score", "summary_rating", "reply_edit", "category_change"])
+                        choices=["importance_score", "summary_rating", "reply_edit",
+                                 "category_change", "implicit_open", "implicit_delete_unread"])
     parser.add_argument("--feedback-data", required=True, help="JSON string")
     parser.add_argument("--email-id", required=True)
     parser.add_argument("--account-id", required=True)

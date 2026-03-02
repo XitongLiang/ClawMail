@@ -1,5 +1,8 @@
 # 邮件分析输出格式规范
 
+> **注意**：本文档描述的是**最终写入 ai-metadata 的格式**。
+> LLM 输出的 `importance_scores`（四个原始分）会被 Python 后处理为 `importance_score` + `importance_breakdown`。
+
 ## JSON Schema
 
 ```json
@@ -18,8 +21,8 @@
           "minItems": 0,
           "maxItems": 8
         },
-        "one_line": {"type": "string", "maxLength": 20},
-        "brief": {"type": "string"}
+        "one_line": {"type": "string", "maxLength": 30},
+        "brief": {"type": "string", "maxLength": 150}
       }
     },
     "action_items": {
@@ -52,9 +55,13 @@
         "language": {"enum": ["zh", "en", "ja"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "is_spam": {"type": "boolean"},
-        "importance_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "importance_score": {
+          "type": "integer", "minimum": 0, "maximum": 100,
+          "description": "Python 从 LLM 输出的 importance_scores 加权计算得出"
+        },
         "importance_breakdown": {
           "type": "object",
+          "description": "Python 计算得出，包含四维度权重、原始分和加权贡献",
           "properties": {
             "sender_weight": {"type": "integer"},
             "sender_score": {"type": "integer"},
@@ -83,14 +90,23 @@
 }
 ```
 
-## 完整示例
+## LLM 原始输出 vs 最终存储
+
+| 字段 | LLM 输出 | Python 后处理 | 最终存储 |
+|------|---------|--------------|---------|
+| importance_scores | `{sender_score, urgency_score, deadline_score, complexity_score}` | 加权计算 | 删除 |
+| importance_score | - | 从 importance_scores 计算 | 0-100 整数 |
+| importance_breakdown | - | 从 importance_scores 生成 | 完整拆解对象 |
+| pending_facts | LLM 输出 | 分流写入 MemoryBank / pending 池 | 从 ai-metadata 中移除 |
+
+## 完整示例（最终存储格式）
 
 ```json
 {
   "summary": {
     "keywords": ["Q4报告", "张总", "周五截止", "财务数据"],
     "one_line": "张总要求周五前提交Q4财务报告",
-    "brief": "张总邮件要求各部门在本周五（3月1日）前提交Q4季度财务报告。\n报告需包含收入、支出、利润三大板块数据。\n请确保数据准确，并抄送财务部审核。",
+    "brief": "张总邮件要求各部门在本周五（3月1日）前提交Q4季度财务报告。\n报告需包含收入、支出、利润三大板块数据。\n请确保数据准确，并抄送财务部审核。"
   },
   "action_items": [
     {
@@ -146,8 +162,8 @@
 | 字段 | 类型 | 限制 | 说明 |
 |------|------|------|------|
 | keywords | array | 3-8个 | 最具代表性的关键词 |
-| one_line | string | 20字以内 | 一句话核心概括 |
-| brief | string | 3-5行 | 标准摘要 |
+| one_line | string | 30字以内 | 一句话核心概括 |
+| brief | string | 3-5行，≤150字 | 结构化摘要 |
 
 ### action_items
 | 字段 | 类型 | 说明 |
@@ -163,14 +179,14 @@
 > **数量限制**: 最多 10 个行动事项。超出时仅保留优先级最高的前 10 个。
 
 ### metadata
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| category | array | 分类标签，最多4个 |
-| sentiment | enum | positive/negative/neutral |
-| language | enum | zh/en/ja |
-| confidence | number | 0.0-1.0 置信度 |
-| is_spam | boolean | 是否为垃圾邮件 |
-| importance_score | integer | 0-100 重要性评分 |
-| importance_breakdown | object | 评分四维度拆解 |
-| suggested_reply | string/null | 建议回复草稿 |
-| reply_stances | array | 回复立场选项，最多4个 |
+| 字段 | 类型 | 来源 | 说明 |
+|------|------|------|------|
+| category | array | LLM | 分类标签，最多4个 |
+| sentiment | enum | LLM | positive/negative/neutral |
+| language | enum | LLM | zh/en/ja |
+| confidence | number | LLM | 0.0-1.0 置信度 |
+| is_spam | boolean | LLM | 是否为垃圾邮件 |
+| importance_score | integer | Python 计算 | 0-100 重要性评分 |
+| importance_breakdown | object | Python 计算 | 评分四维度拆解 |
+| suggested_reply | string/null | LLM | 建议回复草稿 |
+| reply_stances | array | LLM | 回复立场选项，最多4个 |

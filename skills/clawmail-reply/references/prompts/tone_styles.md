@@ -2,12 +2,12 @@
 
 ## 风格总览
 
-| 风格 | 字数参考 | 特征 |
-|------|---------|------|
-| 正式 | 120-250字 | 完整称呼、正式用语、完整段落、礼貌结尾 |
-| 礼貌 | 80-180字 | 称呼 + 正文 + 简短结尾，得体但不过度正式 |
-| 轻松 | 40-100字 | 简短称呼或无称呼，口语化表达 |
-| 简短 | 20-60字 | 直奔主题，无称呼无结尾，只说关键内容 |
+| 风格 | 中文字数 | 英文词数 | 特征 |
+|------|---------|---------|------|
+| 正式 | 120-250字 | 80-180 words | 完整称呼、正式用语、完整段落、礼貌结尾 |
+| 礼貌 | 80-180字 | 50-120 words | 称呼 + 正文 + 简短结尾，得体但不过度正式 |
+| 轻松 | 40-100字 | 25-70 words | 简短称呼或无称呼，口语化表达 |
+| 简短 | 20-60字 | 10-40 words | 直奔主题，无称呼无结尾，只说关键内容 |
 
 > **注意**：字数是参考范围，不是硬限制。简单的确认不需要凑够 120 字；复杂的回复不应为了"简短"而漏掉关键信息。内容完整优先，字数其次。
 
@@ -19,9 +19,7 @@
 ```
 王总您好，
 
-感谢您发送Q4项目进度汇报的会议邀请。
-
-我确认将于本周五下午2点准时参加会议。关于团队进度报告PPT，我将在周四前完成准备并提前发送给您预览。如有其他需要提前准备的材料，请于周三前告知。
+本周五下午2点的会议我确认参加。团队进度报告PPT将于周四前准备完毕并提前发送给您预览。如有其他需要提前准备的材料，请于周三前告知。
 
 此致
 ```
@@ -53,9 +51,7 @@
 ```
 Dear Mr. Wang,
 
-Thank you for the meeting invitation regarding the Q4 project progress review.
-
-I confirm my attendance on Friday at 2:00 PM. I will have the team progress presentation ready and send it to you by Thursday for your review. Please let me know by Wednesday if there are any additional materials I should prepare.
+I confirm my attendance at Friday's 2:00 PM meeting. I will have the team progress presentation ready and send it to you by Thursday for your review. Please let me know by Wednesday if there are any additional materials I should prepare.
 
 Best regards,
 ```

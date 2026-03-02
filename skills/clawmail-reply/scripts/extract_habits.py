@@ -25,7 +25,7 @@ REFERENCES_DIR = Path(__file__).parent.parent / "references"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[habits] %(asctime)s %(levelname)s: %(message)s",
+    format="[Habits] %(asctime)s %(levelname)s: %(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
@@ -166,13 +166,16 @@ def extract_habits(compose_data: dict, account_id: str) -> dict:
         for f in facts:
             f["source_email_id"] = compose_data.get("email_id", "compose")
         api_post(f"/pending-facts/{account_id}", {"facts": facts})
-        api_post(f"/pending-facts/{account_id}/promote")
+        api_post(f"/pending-facts/{account_id}/promote", {})
         logger.info("Pending facts 已写入并触发提升检查")
 
     return {"status": "success", "facts_count": len(facts)}
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="用户撰写习惯提取")
     parser.add_argument("--compose-data", required=True, help="用户撰写数据 JSON")
     parser.add_argument("--account-id", required=True, help="账户ID")
