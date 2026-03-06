@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-List tasks from ClawMail database with various filters.
+从 ClawMail 数据库列出任务，支持多种筛选条件。
 """
 
 import argparse
@@ -9,42 +9,42 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-# Database path
+# 数据库路径
 DB_PATH = Path.home() / "clawmail_data" / "clawmail.db"
 
 
 def get_db_connection():
-    """Get SQLite connection with row factory."""
+    """获取带行工厂的 SQLite 连接。"""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def list_tasks(status=None, priority=None, email_id=None, limit=100):
-    """List tasks with optional filters."""
+    """列出任务，支持可选筛选条件。"""
     conn = get_db_connection()
-    
+
     query = "SELECT * FROM tasks WHERE 1=1"
     params = []
-    
+
     if status:
         query += " AND status = ?"
         params.append(status)
-    
+
     if priority:
         query += " AND priority = ?"
         params.append(priority)
-    
+
     if email_id:
         query += " AND source_email_id = ?"
         params.append(email_id)
-    
+
     query += " ORDER BY due_date ASC, created_at DESC LIMIT ?"
     params.append(limit)
-    
+
     rows = conn.execute(query, params).fetchall()
     conn.close()
-    
+
     tasks = []
     for row in rows:
         task = {
@@ -65,21 +65,21 @@ def list_tasks(status=None, priority=None, email_id=None, limit=100):
             "created_at": row["created_at"],
         }
         tasks.append(task)
-    
+
     return tasks
 
 
 def format_task_line(task):
-    """Format task as a single line summary."""
+    """将任务格式化为单行摘要。"""
     flag_icon = "F" if task["is_flagged"] else " "
-    
+
     priority_icon = {
         "high": "H",
         "medium": "M",
         "low": "L",
         "none": "-"
     }.get(task["priority"], "-")
-    
+
     status_icon = {
         "pending": "PENDING",
         "in_progress": "DOING",
@@ -89,59 +89,59 @@ def format_task_line(task):
         "rejected": "REJECTED",
         "archived": "ARCHIVED"
     }.get(task["status"], "UNKNOWN")
-    
-    title = task["title"] or "(no title)"
+
+    title = task["title"] or "(无标题)"
     if len(title) > 50:
         title = title[:47] + "..."
-    
-    due = task["due_date"] or "No due date"
-    
-    return f"{flag_icon} {priority_icon} {status_icon} {task['id'][:8]}... | {title:50} | Due: {due}"
+
+    due = task["due_date"] or "无截止日期"
+
+    return f"{flag_icon} {priority_icon} {status_icon} {task['id'][:8]}... | {title:50} | 截止: {due}"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="List tasks from ClawMail database")
+    parser = argparse.ArgumentParser(description="从 ClawMail 数据库列出任务")
     parser.add_argument("--status", choices=["pending", "in_progress", "snoozed", "completed", "cancelled", "rejected", "archived"],
-                        help="Filter by status")
+                        help="按状态筛选")
     parser.add_argument("--priority", choices=["high", "medium", "low", "none"],
-                        help="Filter by priority")
-    parser.add_argument("--email", help="Filter by source email ID")
-    parser.add_argument("--limit", type=int, default=100, help="Limit results (default: 100)")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    
+                        help="按优先级筛选")
+    parser.add_argument("--email", help="按来源邮件 ID 筛选")
+    parser.add_argument("--limit", type=int, default=100, help="限制结果数量（默认: 100）")
+    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     args = parser.parse_args()
-    
+
     if not DB_PATH.exists():
-        print(f"Error: Database not found at {DB_PATH}")
+        print(f"错误: 数据库不存在于 {DB_PATH}")
         return 1
-    
+
     tasks = list_tasks(
         status=args.status,
         priority=args.priority,
         email_id=args.email,
         limit=args.limit
     )
-    
+
     if args.json:
         print(json.dumps(tasks, indent=2, default=str))
     else:
         if not tasks:
-            print("No tasks found matching the criteria.")
+            print("未找到符合条件的任务。")
             return 0
-        
-        print(f"Found {len(tasks)} task(s):")
+
+        print(f"找到 {len(tasks)} 个任务:")
         print("-" * 100)
-        print(f"{'Flag':4} {'Pri':3} {'Status':3} {'ID':10} {'Title':50} {'Due Date'}")
+        print(f"{'标记':4} {'优先':3} {'状态':3} {'ID':10} {'标题':50} {'截止日期'}")
         print("-" * 100)
-        
+
         for task in tasks:
             print(format_task_line(task))
             if task["description"]:
                 desc = task["description"].replace("\n", " ")
                 if len(desc) > 80:
                     desc = desc[:77] + "..."
-                print(f"      Description: {desc}")
-    
+                print(f"      描述: {desc}")
+
     return 0
 
 

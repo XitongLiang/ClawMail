@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Get AI metadata for a specific email.
+获取指定邮件的 AI 元数据。
 """
 
 import argparse
@@ -8,31 +8,31 @@ import json
 import sqlite3
 from pathlib import Path
 
-# Database path
+# 数据库路径
 DB_PATH = Path.home() / "clawmail_data" / "clawmail.db"
 
 
 def get_db_connection():
-    """Get SQLite connection with row factory."""
+    """获取带行工厂的 SQLite 连接。"""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def get_ai_metadata(email_id):
-    """Get AI metadata for an email."""
+    """获取指定邮件的 AI 元数据。"""
     conn = get_db_connection()
-    
+
     row = conn.execute(
         "SELECT * FROM email_ai_metadata WHERE email_id = ?",
         (email_id,)
     ).fetchone()
-    
+
     conn.close()
-    
+
     if not row:
         return None
-    
+
     metadata = {
         "email_id": row["email_id"],
         "keywords": json.loads(row["keywords"]) if row["keywords"] else None,
@@ -50,86 +50,86 @@ def get_ai_metadata(email_id):
         "processed_at": row["processed_at"],
         "processing_error": row["processing_error"],
     }
-    
+
     return metadata
 
 
 def format_metadata(metadata):
-    """Format AI metadata for display."""
+    """格式化 AI 元数据以供显示。"""
     lines = []
     lines.append("=" * 60)
-    lines.append("🤖 AI Metadata for Email")
+    lines.append("🤖 邮件 AI 元数据")
     lines.append("=" * 60)
-    lines.append(f"Email ID: {metadata['email_id']}")
-    lines.append(f"AI Status: {metadata['ai_status']}")
-    lines.append(f"Processing: {metadata['processing_progress']}%")
+    lines.append(f"邮件 ID: {metadata['email_id']}")
+    lines.append(f"AI 状态: {metadata['ai_status']}")
+    lines.append(f"处理进度: {metadata['processing_progress']}%")
     lines.append("")
-    
+
     if metadata["sentiment"]:
-        lines.append(f"Sentiment: {metadata['sentiment']}")
-    
+        lines.append(f"情感: {metadata['sentiment']}")
+
     if metadata["is_spam"] is not None:
-        lines.append(f"Spam: {'Yes' if metadata['is_spam'] else 'No'}")
-    
+        lines.append(f"垃圾邮件: {'是' if metadata['is_spam'] else '否'}")
+
     if metadata["categories"]:
-        lines.append(f"Categories: {', '.join(metadata['categories'])}")
-    
+        lines.append(f"分类: {', '.join(metadata['categories'])}")
+
     if metadata["keywords"]:
-        lines.append(f"Keywords: {', '.join(metadata['keywords'])}")
-    
+        lines.append(f"关键词: {', '.join(metadata['keywords'])}")
+
     if metadata["summary_one_line"]:
         lines.append("")
         lines.append("-" * 60)
-        lines.append("One-line Summary:")
+        lines.append("一句话摘要:")
         lines.append("-" * 60)
         lines.append(metadata["summary_one_line"])
-    
+
     if metadata["summary_brief"]:
         lines.append("")
         lines.append("-" * 60)
-        lines.append("Brief Summary:")
+        lines.append("简要摘要:")
         lines.append("-" * 60)
         lines.append(metadata["summary_brief"])
-    
+
     if metadata["suggested_reply"]:
         lines.append("")
         lines.append("-" * 60)
-        lines.append("Suggested Reply:")
+        lines.append("建议回复:")
         lines.append("-" * 60)
         lines.append(metadata["suggested_reply"])
-    
+
     if metadata["processing_error"]:
         lines.append("")
         lines.append("-" * 60)
-        lines.append("Processing Error:")
+        lines.append("处理错误:")
         lines.append("-" * 60)
         lines.append(metadata["processing_error"])
-    
+
     return "\n".join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Get AI metadata for an email")
-    parser.add_argument("email_id", help="Email ID")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    
+    parser = argparse.ArgumentParser(description="获取邮件的 AI 元数据")
+    parser.add_argument("email_id", help="邮件 ID")
+    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     args = parser.parse_args()
-    
+
     if not DB_PATH.exists():
-        print(f"Error: Database not found at {DB_PATH}")
+        print(f"错误: 数据库不存在于 {DB_PATH}")
         return 1
-    
+
     metadata = get_ai_metadata(args.email_id)
-    
+
     if not metadata:
-        print(f"No AI metadata found for email {args.email_id}")
+        print(f"未找到邮件 {args.email_id} 的 AI 元数据")
         return 1
-    
+
     if args.json:
         print(json.dumps(metadata, indent=2, default=str))
     else:
         print(format_metadata(metadata))
-    
+
     return 0
 
 

@@ -324,6 +324,16 @@ class _EmailWebPage(QWebEnginePage):
             if url.scheme() == "clawmail-proactive":
                 self.proactive_link_clicked.emit(url.toString())
                 return False
+            if url.scheme() == "clawmail-attach":
+                import os, subprocess
+                from urllib.parse import unquote
+                path = unquote(url.query().replace("path=", "", 1))
+                if os.path.exists(path):
+                    if url.host() == "open":
+                        os.startfile(path)
+                    elif url.host() == "folder":
+                        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                return False
             QDesktopServices.openUrl(url)
             return False  # 阻止在 WebView 内部跳转
         return True
@@ -1393,14 +1403,25 @@ class ClawMailApp(QMainWindow):
         # 附件列表
         attachments = self._db.get_attachments_by_email(email_id) if self._db else []
         if attachments:
+            from urllib.parse import quote
             def _fmt_size(n: int) -> str:
                 return f"{n // 1024} KB" if n >= 1024 else f"{n} B"
-            items = "".join(
-                f"<a href='file://{att['storage_path']}' style='margin-right:12px'>"
-                f"📎 {_esc(att['filename'])} ({_fmt_size(att['size_bytes'] or 0)})</a>"
-                for att in attachments
-            )
             _at = get_theme()
+            _link_style = (
+                "font-size:11px;margin-left:6px;padding:1px 5px;"
+                f"border:1px solid {_at.html_header_border()};border-radius:3px;"
+                "text-decoration:none"
+            )
+            items = ""
+            for att in attachments:
+                enc_path = quote(att['storage_path'], safe='')
+                items += (
+                    f"<span style='margin-right:14px;white-space:nowrap'>"
+                    f"📎 {_esc(att['filename'])} ({_fmt_size(att['size_bytes'] or 0)})"
+                    f"  <a href='clawmail-attach://open?path={enc_path}' style='{_link_style}'>打开</a>"
+                    f"  <a href='clawmail-attach://folder?path={enc_path}' style='{_link_style}'>打开文件夹</a>"
+                    f"</span>"
+                )
             html += (
                 f"<div style='padding:10px 14px;background:{_at.html_panel_bg()};"
                 f"color:{_at.html_text()};"

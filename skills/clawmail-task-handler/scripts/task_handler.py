@@ -28,7 +28,7 @@ class TaskHandler:
         self.timeout = 60
 
     # ----------------------------------------------------------------
-    # HTTP helpers (stdlib only, no requests dependency)
+    # HTTP 辅助方法（仅使用标准库，无需 requests 依赖）
     # ----------------------------------------------------------------
 
     def _http_get(self, url: str, timeout: int = None) -> Optional[Dict]:
@@ -66,25 +66,25 @@ class TaskHandler:
         print(f"\n{'='*50}")
         print(f"处理任务: {task_id}")
         print(f"{'='*50}")
-        
+
         # 1. 获取任务详情
         task = self._get_task(task_id)
         if not task:
             return {"success": False, "error": "Task not found"}
-        
+
         print(f"任务: {task.get('title')}")
         print(f"分类: {task.get('category')}")
         print(f"优先级: {task.get('priority')}")
-        
+
         # 2. 获取关联邮件
         email = self._get_source_email(task_id)
         if not email:
             print("[!] 未找到关联邮件")
             return {"success": False, "error": "No source email"}
-        
+
         print(f"关联邮件: {email.get('subject')}")
         print(f"发件人: {email.get('from_name')} <{email.get('from')}>")
-        
+
         # 3. proactive 任务交给 agent 自主执行
         if task.get('source_type') == 'proactive':
             print("\n任务类型: proactive (agent 模式)")
@@ -129,33 +129,33 @@ class TaskHandler:
             "action": selected,
             "details": action_result
         }
-    
+
     def process_all_pending(self, dry_run: bool = False) -> List[Dict]:
         """处理所有待处理任务"""
         tasks = self._get_pending_tasks()
         print(f"\n发现 {len(tasks)} 个待处理任务\n")
-        
+
         results = []
         for task in tasks:
             result = self.process_task(task['id'], dry_run=dry_run)
             results.append(result)
-        
+
         return results
-    
+
     def _get_task(self, task_id: str) -> Optional[Dict]:
         """获取任务详情"""
         return self._http_get(f"{self.api}/tasks/{task_id}")
-    
+
     def _get_pending_tasks(self) -> List[Dict]:
         """获取所有待处理任务"""
         data = self._http_get(f"{self.api}/tasks?status=pending&limit=50")
         return (data or {}).get('tasks', [])
-    
+
     def _get_source_email(self, task_id: str) -> Optional[Dict]:
         """获取任务关联的源邮件"""
         data = self._http_get(f"{self.api}/tasks/{task_id}/email")
         return (data or {}).get('email')
-    
+
     def _analyze_task(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
         """分析非 proactive 任务类型并生成选项。"""
         title = task.get('title', '').lower()
@@ -170,7 +170,7 @@ class TaskHandler:
     def _generate_meeting_options(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
         """生成会议确认选项"""
         body = email.get('body', '')
-        
+
         # 提取时间段（简化处理）
         options = [
             {
@@ -203,9 +203,9 @@ class TaskHandler:
                 "action": "skip"
             }
         ]
-        
+
         return "meeting_confirmation", options
-    
+
     def _generate_reply_options(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
         """生成邮件回复选项"""
         options = [
@@ -227,7 +227,7 @@ class TaskHandler:
             }
         ]
         return "email_reply", options
-    
+
     def _generate_generic_options(self, task: Dict, email: Dict) -> Tuple[str, List[Dict]]:
         """生成通用选项"""
         options = [
@@ -249,12 +249,12 @@ class TaskHandler:
             }
         ]
         return "generic", options
-    
+
     def _generate_meeting_reply(self, email: Dict, time_slot: str) -> str:
         """生成会议确认回复"""
         from_name = email.get('from_name', '')
         first_name = from_name.split()[0] if from_name else '您好'
-        
+
         return f"""{first_name}，
 
 好的，那我们定在明天下午{time_slot}开会。
@@ -263,29 +263,29 @@ class TaskHandler:
 
 谢谢，
 Tony"""
-    
+
     def _generate_ask_time_reply(self, email: Dict) -> str:
         """生成询问时间回复"""
         from_name = email.get('from_name', '')
         first_name = from_name.split()[0] if from_name else '您好'
-        
+
         return f"""{first_name}，
 
 收到，明天下午我有空。
 
 请问您建议哪个具体时间段比较方便？以下是可选时间：
 - 14:00-15:00
-- 15:00-16:00  
+- 15:00-16:00
 - 16:00-17:00
 
 请告诉我您的偏好，谢谢！
 
 Tony"""
-    
+
     def _generate_generic_reply(self, email: Dict) -> str:
         """生成通用回复"""
         return "收到，我会尽快处理。谢谢！"
-    
+
     def _show_confirm_dialog(self, task: Dict, options: List[Dict]) -> Dict:
         """显示确认弹窗"""
         dialog_options = [{"id": opt["id"], "label": opt["label"]} for opt in options]
@@ -299,8 +299,8 @@ Tony"""
         }
 
         result = self._http_post(f"{self.api}/ui/confirm-dialog", payload, timeout=70)
-        return result or {"success": False, "error": "Dialog failed"}
-    
+        return result or {"success": False, "error": "弹窗请求失败"}
+
     def _execute_action(self, selected_id: str, options: List[Dict], email: Dict) -> Dict:
         """执行选中的操作"""
         selected_opt = next((opt for opt in options if opt["id"] == selected_id), None)
@@ -321,18 +321,18 @@ Tony"""
                 email, selected_opt.get("reply_body", ""),
                 attachments=attachments,
             )
-        
+
         elif action == "complete":
             return {"success": True, "action": "marked_complete"}
-        
+
         elif action == "snooze":
             return {"success": True, "action": "snoozed"}
-        
+
         elif action == "skip":
             return {"success": True, "action": "skipped"}
-        
+
         return {"success": False, "error": "Unknown action"}
-    
+
     def _send_reply(self, email: Dict, reply_body: str,
                     attachments: List[str] = None) -> Dict:
         """发送回复邮件（可选附件）"""
@@ -368,7 +368,7 @@ Tony"""
         if result is not None:
             return {"success": True, "action": "opened_compose"}
         return {"success": False, "error": "compose 请求失败"}
-    
+
     def _complete_task(self, task_id: str) -> bool:
         """标记任务完成"""
         result = self._http_post(f"{self.api}/tasks/{task_id}/complete", {})
@@ -376,28 +376,28 @@ Tony"""
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ClawMail Task Handler")
+    parser = argparse.ArgumentParser(description="ClawMail 任务处理器")
     parser.add_argument("--task-id", help="处理指定任务ID")
     parser.add_argument("--all-pending", action="store_true", help="处理所有待处理任务")
     parser.add_argument("--dry-run", action="store_true", help="测试模式，不实际执行")
-    
+
     args = parser.parse_args()
-    
+
     handler = TaskHandler()
-    
+
     if args.task_id:
         result = handler.process_task(args.task_id, dry_run=args.dry_run)
         print("\n" + "="*50)
         print("处理结果:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    
+
     elif args.all_pending:
         results = handler.process_all_pending(dry_run=args.dry_run)
         print("\n" + "="*50)
         print(f"处理了 {len(results)} 个任务")
         success_count = sum(1 for r in results if r.get('success'))
         print(f"成功: {success_count}/{len(results)}")
-    
+
     else:
         parser.print_help()
 

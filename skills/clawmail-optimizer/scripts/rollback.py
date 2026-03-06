@@ -74,7 +74,7 @@ def list_backups(prompt_type: str, target_name: str | None) -> None:
             mtime = bp.stat().st_mtime
             from datetime import datetime
             ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-            label = " (latest)" if i == 0 else ""
+            label = "（最新）" if i == 0 else ""
             print(f"  [{i}] {bp.name}  ({size} bytes, {ts}){label}")
 
 

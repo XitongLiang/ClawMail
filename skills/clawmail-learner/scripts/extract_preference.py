@@ -28,14 +28,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# System prompt: 强制 LLM 只返回 JSON 数组
+# 系统提示词：强制 LLM 只返回 JSON 数组
 _SYSTEM_PROMPT = (
     "你是一个 JSON 输出机器。你的唯一任务是根据用户的指令返回一个 JSON 数组。"
     "不要输出任何分析过程、解释、Markdown 标记或其他文字。"
     "只输出一个合法的 JSON 数组，以 [ 开头，以 ] 结尾。"
 )
 
-# Learner prompt 模板（逐个应用所有技能分析用户修正）
+# 学习器提示词模板（逐个应用所有技能分析用户修正）
 _LEARNER_PROMPT = """你是 ClawMail 的个性化记忆学习器。
 
 你的任务：分析 AI 预测与用户修正之间的差异，判断修正原因并输出对应操作。
@@ -352,7 +352,7 @@ def main():
     parser.add_argument("--feedback-type", required=True,
                         choices=["importance_score", "summary_rating", "reply_edit",
                                  "category_change", "implicit_open", "implicit_delete_unread"])
-    parser.add_argument("--feedback-data", required=True, help="JSON string")
+    parser.add_argument("--feedback-data", required=True, help="反馈数据（JSON 字符串）")
     parser.add_argument("--email-id", required=True)
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--clawmail-api", default="http://127.0.0.1:9999")

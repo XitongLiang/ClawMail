@@ -661,7 +661,7 @@ def main():
         help="LLM API 地址",
     )
     parser.add_argument("--model", default="kimi-k2.5", help="LLM 模型名称")
-    parser.add_argument("--llm-token", default="", help="LLM Gateway auth token")
+    parser.add_argument("--llm-token", default="", help="LLM 网关鉴权 token")
     global CLAWMAIL_API, LLM_API, MODEL, LLM_TOKEN, MIN_FEEDBACK_COUNT
     parser.add_argument(
         "--min-feedback", type=int, default=MIN_FEEDBACK_COUNT,

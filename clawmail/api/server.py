@@ -1066,6 +1066,14 @@ async def get_thread_emails(thread_id: str, limit: int = 20):
     return {"emails": emails, "thread_id": thread_id, "count": len(emails)}
 
 
+@app.get("/emails/sent-samples")
+async def get_sent_email_samples(account_id: str, limit: int = 3):
+    """获取最近已发送邮件样本，供 generate_reply.py 写作风格 few-shot 注入。"""
+    _check_ready()
+    samples = _db.get_recent_sent_emails_for_fewshot(account_id, limit=min(limit, 5))
+    return {"samples": samples}
+
+
 @app.get("/emails/{email_id}")
 async def get_email(email_id: str):
     """Skill 获取邮件完整数据。"""
@@ -1074,6 +1082,14 @@ async def get_email(email_id: str):
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
     return email
+
+
+@app.get("/emails/{email_id}/attachments")
+async def get_email_attachments(email_id: str):
+    """获取邮件的完整附件列表（含 storage_path、is_downloaded、ai_description）。"""
+    _check_ready()
+    atts = _db.get_attachments_by_email(email_id)
+    return {"attachments": atts}
 
 
 @app.get("/emails/{email_id}/ai-metadata")
@@ -1158,11 +1174,22 @@ async def get_memories_for_email(
     sender_email: str = "",
     sender_domain: str = "",
 ):
-    """Skill 获取与当前邮件相关的偏好记忆（全局 + 发件人 + 域名）。"""
+    """Skill 获取与当前邮件相关的偏好记忆（全局 + 发件人 + 域名 + 文件记忆）。"""
     _check_ready()
     if not sender_domain and sender_email and "@" in sender_email:
         sender_domain = sender_email.split("@", 1)[1]
     memories = _db.get_memories_for_email(account_id, sender_email, sender_domain)
+    if sender_email:
+        existing_ids = {m.id for m in memories}
+        # 追加文件记忆（resource_file 通过 json_extract 匹配，不在标准查询中）
+        file_memories = _db.get_resource_files_for_sender(account_id, sender_email)
+        memories = memories + [m for m in file_memories if m.id not in existing_ids]
+        # 追加情节交互记忆（episodic_interaction，按 memory_key LIKE 匹配）
+        existing_ids = {m.id for m in memories}
+        episodic_memories = _db.get_episodic_interactions_for_sender(
+            account_id, sender_email, limit=5
+        )
+        memories = memories + [m for m in episodic_memories if m.id not in existing_ids]
     return {
         "memories": [
             {
@@ -1257,6 +1284,65 @@ async def write_memory(account_id: str, body: dict):
     )
     _db.upsert_memory(memory)
     return {"status": "ok", "op": "insert"}
+
+
+# ── Skill-Driven: Resource File Memory 端点 ──
+
+
+@app.get("/memories/{account_id}/files")
+async def get_resource_files(
+    account_id: str,
+    keywords: str = "",
+    sender_email: str = "",
+):
+    """按关键词和/或发件人检索文件记忆（resource_file 类型）。
+    keywords: 逗号分隔的关键词列表。
+    """
+    _check_ready()
+    results: list = []
+    seen_ids: set = set()
+
+    if sender_email:
+        for m in _db.get_resource_files_for_sender(account_id, sender_email):
+            if m.id not in seen_ids:
+                results.append(m)
+                seen_ids.add(m.id)
+
+    if keywords:
+        kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
+        for m in _db.get_resource_files_by_keywords(account_id, kw_list):
+            if m.id not in seen_ids:
+                results.append(m)
+                seen_ids.add(m.id)
+
+    files = []
+    for m in results:
+        content = m.memory_content or {}
+        files.append({
+            "memory_id": m.id,
+            "filename": content.get("filename", ""),
+            "file_path": content.get("file_path", ""),
+            "file_type": content.get("file_type", ""),
+            "source": content.get("source", ""),
+            "summary": content.get("summary", ""),
+            "key_entities": content.get("key_entities", []),
+            "sender_email": content.get("sender_email", ""),
+            "direction": content.get("direction", ""),
+            "email_subject": content.get("email_subject", ""),
+            "email_date": content.get("email_date", ""),
+            "last_updated": m.last_updated.isoformat() if m.last_updated else None,
+        })
+    return {"files": files}
+
+
+@app.patch("/attachments/{attachment_id}/extracted-content")
+async def update_attachment_extracted_content(attachment_id: str, body: dict):
+    """更新附件的 AI 描述和提取文本（供 extract_file_content.py 写回缓存）。"""
+    _check_ready()
+    ai_description = body.get("ai_description", "")
+    extracted_text = body.get("extracted_text", "")
+    _db.update_attachment_extracted_content(attachment_id, ai_description, extracted_text)
+    return {"status": "ok"}
 
 
 # ── Skill-Driven: Pending Facts 端点 ──

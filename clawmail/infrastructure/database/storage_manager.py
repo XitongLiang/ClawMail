@@ -1125,13 +1125,24 @@ class ClawDB:
             conn.commit()
 
     def get_attachments_by_email(self, email_id: str) -> list:
-        """返回邮件的附件列表，每项为 dict {filename, content_type, size_bytes, storage_path}。"""
+        """返回邮件的附件列表，每项为 dict {id, filename, content_type, size_bytes, storage_path, is_downloaded, ai_description}。"""
         with self.get_conn() as conn:
             rows = conn.execute(
-                "SELECT filename, content_type, size_bytes, storage_path FROM attachments WHERE email_id = ?",
+                "SELECT id, filename, content_type, size_bytes, storage_path, is_downloaded, ai_description FROM attachments WHERE email_id = ?",
                 (email_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def update_attachment_extracted_content(
+        self, attachment_id: str, ai_description: str, extracted_text: str
+    ) -> None:
+        """更新附件的 AI 描述和提取文本（用于文件记忆缓存）。"""
+        with self.get_conn() as conn:
+            conn.execute(
+                "UPDATE attachments SET ai_description = ?, extracted_text = ? WHERE id = ?",
+                (ai_description, extracted_text, attachment_id),
+            )
+            conn.commit()
 
     def mark_email_read(self, email_id: str, read: bool = True) -> None:
         """将邮件标记为已读（read）或未读（unread）。"""
@@ -1566,6 +1577,154 @@ class ClawDB:
                 (memory_id,),
             )
             conn.commit()
+
+    def get_resource_files_for_sender(
+        self, account_id: str, sender_email: str, limit: int = 20
+    ) -> List[UserMemory]:
+        """检索与指定发件人相关的文件记忆（resource_file 类型，通过 LIKE 匹配 sender_email）。"""
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_preference_memory
+                   WHERE user_account_id = ?
+                     AND memory_type = 'resource_file'
+                     AND memory_content LIKE ?
+                   ORDER BY last_updated DESC
+                   LIMIT ?""",
+                (account_id, f'%"sender_email": "{sender_email}"%', limit),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_resource_files_by_keywords(
+        self, account_id: str, keywords: List[str], limit: int = 10
+    ) -> List[UserMemory]:
+        """按关键词检索文件记忆，使用 TF-IDF 相关度排序（Task 6: 向量语义检索 fallback）。
+
+        步骤：
+        1. LIKE 匹配过滤候选集（上限 limit*5）
+        2. 对候选集用 TF-IDF 相关度重排序
+        3. 返回前 limit 条
+        """
+        if not keywords:
+            return []
+        with self.get_conn() as conn:
+            conditions = " OR ".join(
+                "memory_content LIKE ?" for _ in keywords
+            )
+            fetch_limit = limit * 5
+            params = [account_id] + [f"%{kw}%" for kw in keywords] + [fetch_limit]
+            rows = conn.execute(
+                f"""SELECT * FROM user_preference_memory
+                   WHERE user_account_id = ?
+                     AND memory_type = 'resource_file'
+                     AND ({conditions})
+                   ORDER BY last_updated DESC
+                   LIMIT ?""",
+                params,
+            ).fetchall()
+        memories = [self._row_to_memory(r) for r in rows]
+        if len(memories) <= limit:
+            return memories
+        # TF-IDF 相关度重排序
+        return self._rank_by_tfidf(memories, keywords)[:limit]
+
+    @staticmethod
+    def _rank_by_tfidf(memories: List["UserMemory"], query_terms: List[str]) -> List["UserMemory"]:
+        """轻量级 TF-IDF 排序（无外部依赖）。
+        对每条记忆的 memory_content 文本，计算查询词频率 × 逆文档频率得分。
+        """
+        import math
+
+        def _tokenize(text: str) -> list:
+            """简单分词：中文按字符，英文按单词，去重计数。"""
+            import re
+            words = re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", text.lower())
+            return words
+
+        # 构建文档语料
+        docs: List[List[str]] = []
+        for m in memories:
+            content = m.memory_content or {}
+            if isinstance(content, dict):
+                text = json.dumps(content, ensure_ascii=False)
+            else:
+                text = str(content)
+            docs.append(_tokenize(text))
+
+        n_docs = len(docs)
+        # IDF: log((N+1) / (df+1))
+        df: Dict[str, int] = {}
+        for tokens in docs:
+            for t in set(tokens):
+                df[t] = df.get(t, 0) + 1
+
+        # 标准化查询词
+        query_tokens = []
+        for q in query_terms:
+            query_tokens.extend(_tokenize(q))
+
+        scored = []
+        for i, tokens in enumerate(docs):
+            if not tokens:
+                scored.append((memories[i], 0.0))
+                continue
+            tf_map: Dict[str, float] = {}
+            for t in tokens:
+                tf_map[t] = tf_map.get(t, 0) + 1
+            total = len(tokens)
+            score = 0.0
+            for qt in query_tokens:
+                tf = tf_map.get(qt, 0) / total
+                idf = math.log((n_docs + 1) / (df.get(qt, 0) + 1))
+                score += tf * idf
+            scored.append((memories[i], score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [m for m, _ in scored]
+
+    def get_episodic_interactions_for_sender(
+        self, account_id: str, sender_email: str, limit: int = 10
+    ) -> List[UserMemory]:
+        """检索与指定联系人的情节交互记忆（episodic_interaction 类型）。
+        memory_key 格式为 episodic.{sender_email}.{email_id[:8]}。
+        """
+        prefix = f"episodic.{sender_email.lower()}."
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_preference_memory
+                   WHERE user_account_id = ?
+                     AND memory_type = 'episodic_interaction'
+                     AND memory_key LIKE ?
+                   ORDER BY last_updated DESC
+                   LIMIT ?""",
+                (account_id, f"{prefix}%", limit),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def get_recent_sent_emails_for_fewshot(
+        self, account_id: str, limit: int = 3
+    ) -> List[dict]:
+        """查询最近已发送邮件，用于写作风格 few-shot 注入。
+        返回 subject, body_text (前 600 字符), sent_at。
+        """
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, subject, body_text, sent_at
+                   FROM emails
+                   WHERE account_id = ?
+                     AND LOWER(folder) IN ('已发送', 'sent items', 'sent', 'sent mail')
+                     AND body_text IS NOT NULL
+                     AND LENGTH(body_text) > 50
+                   ORDER BY COALESCE(sent_at, created_at) DESC
+                   LIMIT ?""",
+                (account_id, limit),
+            ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            if d.get("body_text"):
+                d["body_text"] = d["body_text"][:600]
+            results.append(d)
+        return results
 
     def _row_to_memory(self, row: sqlite3.Row) -> UserMemory:
         d = dict(row)

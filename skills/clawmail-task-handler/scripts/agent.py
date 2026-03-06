@@ -356,7 +356,7 @@ class ProactiveAgent:
             print(f"[TaskHandler] 工具 {name} 执行出错: {e}")
             return {"error": str(e)}
 
-    # ── HTTP helpers ──
+    # ── HTTP 辅助方法 ──
 
     def _http_get(self, url: str, timeout: int = 30) -> Optional[dict]:
         try:

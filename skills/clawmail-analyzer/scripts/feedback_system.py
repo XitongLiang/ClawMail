@@ -11,7 +11,7 @@ import sys
 from datetime import datetime
 from typing import Dict, List
 
-# Fix Windows encoding
+# 修复 Windows 编码问题
 if sys.platform == 'win32':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
